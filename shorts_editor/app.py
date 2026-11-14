@@ -18,9 +18,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from recommend import MODEL, RecommendError, Recommender, has_key, load_env
 from transcribe import DEFAULT_MODEL, MODELS, Transcriber
 
 BASE = Path(__file__).resolve().parent
+load_env(BASE / ".env")  # ANTHROPIC_API_KEY 등 (값은 화면·로그에 내보내지 않는다)
 STATIC = BASE / "static"
 WORK = Path(os.environ.get("SHORTS_WORK_DIR", BASE / "work")).expanduser()
 WORK.mkdir(parents=True, exist_ok=True)
@@ -260,6 +262,48 @@ def api_transcript(vid: str):
     r = transcriber.result(vid)
     if not r:
         raise HTTPException(404, "아직 자막이 없습니다.")
+    return r
+
+
+# ---------- 3단계: Claude 추천 ----------
+recommender = Recommender(WORK)
+
+
+class RecommendReq(BaseModel):
+    id: str
+    count: int = 5
+    hint: str = ""
+
+
+@app.get("/api/recommend/info")
+def api_recommend_info():
+    return {"has_key": has_key(), "model": MODEL}
+
+
+@app.post("/api/recommend")
+def api_recommend(req: RecommendReq):
+    _video_path(req.id)
+    tr = transcriber.result(req.id)
+    if not tr:
+        raise HTTPException(400, "먼저 ③ 에서 자막을 만들어 주세요.")
+    try:
+        return recommender.start(req.id, tr["segments"], req.count, req.hint.strip())
+    except RecommendError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/recommend/{vid}")
+def api_recommend_status(vid: str):
+    return recommender.status(vid)
+
+
+@app.get("/api/candidates/{vid}")
+def api_candidates(vid: str):
+    r = recommender.result(vid)
+    if not r:
+        raise HTTPException(404, "아직 추천 결과가 없습니다.")
     return r
 
 
