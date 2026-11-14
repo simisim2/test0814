@@ -231,7 +231,7 @@ kbd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 
       <h2 style="margin-top:24px">자막 <span id="trCnt" class="mute"></span></h2>
       <div id="tr"><div class="mute small">아직 없어요. 왼쪽에서 자막을 생성하세요.</div></div>
-      <div class="small mute" style="margin-top:18px">※ 구간은 아직 이 브라우저에만 저장돼요. AI 추천·렌더는 다음 단계에서 붙습니다.</div>
+      <div class="small mute" style="margin-top:18px">※ 구간은 이 PC(서버)에 저장돼요. 폰에서 열어도 같은 구간이 보여요. 렌더는 다음 단계에서 붙습니다.</div>
     </section>
   </main>
 
@@ -312,7 +312,7 @@ $('#addFolder').onclick = async () => {
 
 /* ---------- 영상 열기 ---------- */
 async function openVideo(info){
-  cur = info; tin = tout = null; stopAt = null;
+  cur = info; tin = tout = null; stopAt = null; selClip = null; pendingTitle = "";
   v.src = '/media/' + info.id;
   v.load();
   $('#empty').style.display = 'none';
@@ -320,7 +320,7 @@ async function openVideo(info){
   store.set('last', info.id);
   const w = info.warning ? ' ⚠ '+info.warning : '';
   if (w) showErr(info.warning); else showErr('');
-  renderMarks(); renderClips(); loadList();
+  renderMarks(); loadClips(); loadList();
   loadTranscript(); subShow(false); pollSub();
   loadCandidates(); recError(''); $('#recStart').disabled = false; pollRec();
   goTab('paneStage');
@@ -416,34 +416,65 @@ document.querySelectorAll('[data-n]').forEach(b => b.onclick = () => {
 function playRange(a, b){ if(!cur||a==null||b==null||b<=a) return; stopAt = b; seek(a); v.play(); }
 $('#playSel').onclick = () => playRange(tin, tout);
 
-/* ---------- 저장한 구간 ---------- */
-const clipsKey = () => 'clips:' + (cur ? cur.id : '');
+/* ---------- 저장한 구간 (4단계: 서버에 저장) ---------- */
+let clips = [], clipsReady = false, pendingTitle = '';
+const legacyKey = id => 'clips:' + id;
+async function loadClips(){
+  clips = []; clipsReady = false; renderClips();
+  if(!cur) return;
+  const id = cur.id;
+  try{
+    let list = (await api('/api/clips/' + id)).clips;
+    if(!list.length){                       // 예전(1단계) 브라우저 저장분이 있으면 서버로 옮긴다
+      const old = store.get(legacyKey(id), []);
+      if(old.length){
+        list = (await api('/api/clips/' + id, {method:'PUT', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({clips: old.map(c => ({id:c.id, start:c.start, end:c.end}))})})).clips;
+        try{ localStorage.removeItem(legacyKey(id)); }catch{}
+      }
+    }
+    if(!cur || cur.id !== id) return;       // 그 사이 다른 영상으로 바뀌었으면 버린다
+    clips = list; clipsReady = true; renderClips();
+  }catch(e){ showErr('저장된 구간을 불러오지 못했어요: ' + e.message); }
+}
+async function persistClips(){
+  if(!cur || !clipsReady) return false;
+  try{
+    const r = await api('/api/clips/' + cur.id, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({clips})});
+    clips = r.clips; return true;
+  }catch(e){ showErr('구간을 저장하지 못했어요: ' + e.message); return false; }
+}
 function renderClips(){
   const box = $('#clips'); box.replaceChildren();
-  const list = cur ? store.get(clipsKey(), []) : [];
-  $('#clipCnt').textContent = list.length ? `(${list.length})` : '';
-  if(!list.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 시작·끝을 정하고 저장하세요.'})); return; }
-  list.forEach((c, i) => {
+  $('#clipCnt').textContent = clips.length ? `(${clips.length})` : '';
+  if(!clips.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 시작·끝을 정하고 저장하세요.'})); return; }
+  clips.forEach((c, i) => {
     const play = el('button',{textContent:'▶',title:'재생'}); play.onclick = e => { e.stopPropagation(); playRange(c.start,c.end); goTab('paneStage'); };
     const del = el('button',{textContent:'🗑',title:'삭제',className:'ghost'});
-    del.onclick = e => { e.stopPropagation(); list.splice(i,1); store.set(clipsKey(), list); renderClips(); };
-    const row = el('div',{className:'card clip'+(selClip===c.id?' sel':'')},
+    del.onclick = async e => { e.stopPropagation(); const keep = clips.slice(); clips.splice(i,1); if(!await persistClips()) clips = keep; renderClips(); };
+    const title = el('input',{value:c.title||'',placeholder:'제목 (선택)',style:'padding:6px 8px;font-size:13.5px'});
+    title.onclick = e => e.stopPropagation();
+    title.onchange = async () => { c.title = title.value; await persistClips(); renderClips(); };
+    const row = el('div',{className:'card clip'+(selClip===c.id?' sel':''),style:'flex-wrap:wrap'},
       el('div',{className:'t'}, el('b',{textContent:`#${i+1}  `}), `${fmt(c.start,1)} ~ ${fmt(c.end,1)}`, el('span',{className:'mute',textContent:`  (${(c.end-c.start).toFixed(1)}초)`})),
-      play, del);
+      play, del,
+      el('div',{style:'flex-basis:100%'}, title));
     row.onclick = () => { selClip = c.id; tin = c.start; tout = c.end; renderMarks(); renderClips(); seek(c.start); };  // 눌러서 다시 편집
     box.append(row);
   });
 }
-$('#saveClip').onclick = () => {
+$('#saveClip').onclick = async () => {
   if(!cur) return showErr('먼저 영상을 열어 주세요.');
+  if(!clipsReady) return showErr('저장된 구간을 아직 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.');
   if(tin==null || tout==null || tout<=tin) return showErr('시작과 끝을 먼저 정해 주세요. (끝이 시작보다 뒤여야 해요)');
   showErr('');
-  const list = store.get(clipsKey(), []);
-  const existing = list.find(c => c.id===selClip);
+  const before = JSON.stringify(clips);
+  const existing = clips.find(c => c.id===selClip);
   if (existing) { existing.start = tin; existing.end = tout; }   // 불러온 구간이면 덮어쓰기
-  else { const c = {id: Date.now().toString(36), start: tin, end: tout}; list.push(c); selClip = c.id; }
-  list.sort((a,b) => a.start - b.start);
-  store.set(clipsKey(), list); renderClips();
+  else { const c = {id: Date.now().toString(36), start: tin, end: tout, title: pendingTitle}; clips.push(c); selClip = c.id; }
+  pendingTitle = '';
+  if(!await persistClips()) clips = JSON.parse(before);
+  renderClips();
 };
 
 /* ---------- 자막 (2단계) ---------- */
@@ -524,7 +555,7 @@ function renderCandidates(list){
   if(!list.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 자막을 만든 뒤 왼쪽 ④ 에서 추천을 받으세요.'})); return; }
   list.forEach((c, i) => {
     const use = el('button',{textContent:'이 구간 쓰기',className:'primary'});
-    use.onclick = () => { tin = c.start; tout = c.end; selClip = null; renderMarks(); renderClips(); seek(c.start); };
+    use.onclick = () => { tin = c.start; tout = c.end; selClip = null; pendingTitle = c.title; renderMarks(); renderClips(); seek(c.start); };
     const play = el('button',{textContent:'▶ 미리보기'});
     play.onclick = () => { playRange(c.start, c.end); goTab('paneStage'); };
     const card = el('div',{className:'card',style:'margin-top:8px'},

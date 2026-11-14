@@ -307,6 +307,56 @@ def api_candidates(vid: str):
     return r
 
 
+# ---------- 4단계: 구간(쇼츠) 서버 저장 ----------
+CLIPS_DIR = WORK / "clips"
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+MAX_CLIPS = 200
+
+
+class Clip(BaseModel):
+    id: str
+    start: float
+    end: float
+    title: str = ""
+    note: str = ""
+
+
+class ClipsReq(BaseModel):
+    clips: list[Clip]
+
+
+def _clips_file(vid: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{12}", vid):       # 파일 경로로 쓰이므로 id 형식을 엄격히 확인
+        raise HTTPException(400, "잘못된 영상 id 입니다.")
+    return CLIPS_DIR / f"{vid}.json"
+
+
+@app.get("/api/clips/{vid}")
+def api_get_clips(vid: str):
+    return _load(_clips_file(vid), {"clips": []})
+
+
+@app.put("/api/clips/{vid}")
+def api_put_clips(vid: str, req: ClipsReq):
+    f = _clips_file(vid)
+    if len(req.clips) > MAX_CLIPS:
+        raise HTTPException(400, f"구간은 최대 {MAX_CLIPS}개까지 저장할 수 있어요.")
+    seen, clean = set(), []
+    for c in req.clips:
+        if not (c.start == c.start and c.end == c.end) or c.start < 0 or c.end <= c.start:   # NaN·음수·역순 방지
+            raise HTTPException(400, f"구간이 올바르지 않아요 (시작 {c.start}, 끝 {c.end}). 끝이 시작보다 뒤여야 해요.")
+        if c.id in seen:
+            raise HTTPException(400, "구간 id 가 중복됐어요.")
+        seen.add(c.id)
+        clean.append({"id": c.id[:40], "start": round(c.start, 2), "end": round(c.end, 2),
+                      "title": c.title.strip()[:80], "note": c.note.strip()[:500]})
+    clean.sort(key=lambda x: x["start"])
+    tmp = f.with_suffix(".json.tmp")
+    _save(tmp, {"clips": clean})
+    tmp.replace(f)
+    return {"clips": clean}
+
+
 @app.get("/media/{vid}")
 def media(vid: str):
     """FileResponse가 Range 요청(구간 탐색)을 처리한다."""

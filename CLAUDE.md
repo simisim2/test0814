@@ -7,7 +7,8 @@
 - 1단계 완료 (`shorts_editor/`): 영상 불러오기(경로 붙여넣기·폴더 스캔), 재생, 구간 표시/저장(브라우저 localStorage)
 - 2단계 구현됨 (`shorts_editor/transcribe.py`): ffmpeg 로 소리 추출 → faster-whisper(CPU, int8) → `work/transcripts/<영상id>/transcript.json`. 백그라운드 스레드, 진행률 조회, 취소. UI는 왼쪽 "③ 자막 만들기"·오른쪽 "자막" 목록(클릭하면 해당 시점으로 이동)
 - 3단계 코드 완료, **실제 Claude 호출은 미검증** (`shorts_editor/recommend.py`): 자막 → Claude(기본 `claude-opus-5-5`, `.env` 의 `SHORTS_CLAUDE_MODEL` 로 변경) → JSON 스키마 구조화 출력 → 자막 문장 경계로 보정·중복/길이 검증 → `work/candidates/<id>/candidates.json`. 키 없으면 쉬운 안내 오류. UI: 왼쪽 "④ AI 쇼츠 추천", 오른쪽 "AI 추천 구간"(미리보기 / 이 구간 쓰기). 보정·파이프라인은 가짜 caller 로 테스트함. API 키가 생기면 짧은 영상(2~3분)으로 먼저 실제 호출 확인할 것.
-- 다음: 4단계 구간 편집 서버 저장 → 5단계 카드 렌더
+- 4단계 완료: 구간을 서버에 저장 (`work/clips/<영상id>.json`, `GET/PUT /api/clips/{id}` 전체 교체 방식, 시작<끝·NaN·중복 id 검증, 시작순 정렬). 구간별 제목 입력, AI 추천의 "이 구간 쓰기"는 제목도 함께 저장. 1단계 때 브라우저(localStorage)에 저장한 구간은 처음 열 때 서버로 자동 이전.
+- 다음: 5단계 카드 렌더 (제목 2줄 + 영상 + 하단 문구 → 9:16 mp4)
 
 ## 구조
 - `shorts_editor/app.py` FastAPI 서버 (영상은 경로 대신 id로 `/media/{id}` 스트리밍, Range 지원)
