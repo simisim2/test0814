@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>쇼츠 메이커</title>
+<style>
+:root{
+  --bg:#0e0f13; --panel:#16181f; --panel2:#1d2029; --line:#2a2e3a;
+  --text:#eceef4; --mute:#8b91a3; --accent:#ff4d7e; --accent2:#7c5cff; --ok:#3ddc97; --warn:#ffb020;
+  --r:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:15px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
+  overflow:hidden;-webkit-tap-highlight-color:transparent}
+button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  padding:8px 12px;cursor:pointer;transition:.12s}
+button:hover{border-color:#444a5c;background:#232734}
+button:active{transform:scale(.97)}
+button{white-space:nowrap;flex-shrink:0}
+button.primary{color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;font-weight:700}
+button.ghost{background:transparent}
+input{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+input:focus{outline:2px solid var(--accent2);border-color:transparent}
+.mute{color:var(--mute)} .small{font-size:12.5px}
+
+/* 레이아웃 */
+#app{display:grid;grid-template-rows:56px 1fr;height:100dvh}
+header{display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.logo{font-weight:800;font-size:17px;letter-spacing:-.3px}
+.logo b{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+#nowTitle{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mute);font-size:13.5px}
+main{display:grid;grid-template-columns:320px 1fr 340px;min-height:0}
+section.pane{min-height:0;overflow:auto;padding:16px}
+#paneLib{border-right:1px solid var(--line);background:var(--panel)}
+#paneClips{border-left:1px solid var(--line);background:var(--panel)}
+h2{font-size:13px;color:var(--mute);font-weight:700;letter-spacing:.4px;margin:0 0 10px}
+.card{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);padding:12px}
+.stack>*+*{margin-top:12px}
+
+/* 영상 목록 */
+#drop{border:2px dashed var(--line);border-radius:var(--r);padding:14px;text-align:center;color:var(--mute);transition:.15s}
+#drop.over{border-color:var(--accent);color:var(--text);background:#ff4d7e14}
+.row{display:flex;gap:8px;align-items:center}
+.vid{display:block;width:100%;text-align:left;padding:10px 12px;margin-top:8px}
+.vid.sel{border-color:var(--accent);background:#ff4d7e14}
+.vid .n{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vid .m{font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#err{display:none;white-space:pre-wrap;background:#ff4d4d18;border:1px solid #ff4d4d66;color:#ffb3b3;border-radius:10px;padding:10px 12px;font-size:13px;margin-top:10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{max-width:100%;word-break:break-all;display:inline-flex;gap:6px;align-items:center;font-size:12px;padding:4px 8px;border-radius:99px;background:var(--bg);border:1px solid var(--line);color:var(--mute)}
+.chip button{padding:0 2px;border:0;background:none;color:var(--mute)}
+
+/* 플레이어 */
+#paneStage{display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}
+#stageWrap{flex:1;min-height:0;width:100%;display:flex;align-items:center;justify-content:center}
+#frame{position:relative;background:#000;border-radius:var(--r);overflow:hidden;border:1px solid var(--line);
+  max-width:100%;max-height:100%;aspect-ratio:9/16;height:100%}
+#frame.wide{aspect-ratio:16/9;height:auto;width:100%}
+#frame video{width:100%;height:100%;display:block}
+#frame.vertical video{object-fit:cover}
+#frame.wide video{object-fit:contain}
+#empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--mute);padding:24px}
+#controls{width:100%;max-width:760px}
+#bar{position:relative;height:34px;display:flex;align-items:center;cursor:pointer;touch-action:none}
+#track{position:relative;height:8px;width:100%;background:var(--panel2);border-radius:99px;overflow:hidden}
+#fill{position:absolute;left:0;top:0;bottom:0;background:var(--accent2);width:0}
+#sel{position:absolute;top:0;bottom:0;background:#ff4d7e88;display:none}
+#head{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;background:#fff;border-radius:50%;box-shadow:0 0 0 3px #0008;left:0}
+.mk{position:absolute;top:2px;bottom:2px;width:3px;background:var(--accent);border-radius:2px;display:none;margin-left:-1px}
+.btns{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;margin-top:6px}
+#time{font-variant-numeric:tabular-nums;color:var(--mute);min-width:128px;text-align:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;padding:8px 10px}
+.topbar{display:flex;flex-wrap:wrap;gap:8px;width:100%;max-width:760px;justify-content:space-between}
+.seg button.on{background:var(--accent2)}
+
+/* 구간 패널 */
+.mark{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tv{font-variant-numeric:tabular-nums;font-size:22px;font-weight:700}
+.nudge{display:flex;gap:4px;margin-top:6px}
+.nudge button{flex:1;padding:6px 0;font-size:12.5px}
+.clip{display:flex;align-items:center;gap:8px;margin-top:8px;padding:10px 12px}
+.clip .t{flex:1;font-variant-numeric:tabular-nums;font-size:13.5px}
+.clip.sel{border-color:var(--accent)}
+kbd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12px}
+
+/* 모바일 */
+#tabs{display:none}
+@media (max-width:900px){
+  #app{grid-template-rows:52px 1fr 60px}
+  main{display:block;position:relative}
+  section.pane{position:absolute;inset:0;display:none;border:0}
+  section.pane.active{display:block}
+  #paneStage{display:none}
+  #paneStage.active{display:flex}
+  #tabs{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line);background:var(--panel);padding-bottom:env(safe-area-inset-bottom)}
+  #tabs button{border:0;border-radius:0;background:none;color:var(--mute);font-size:13px;padding:6px}
+  #tabs button.on{color:var(--text);font-weight:700}
+  #tabs button .i{display:block;font-size:20px}
+  .hint-kbd{display:none}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">쇼츠 <b>메이커</b></div>
+    <div id="nowTitle">영상을 골라 주세요</div>
+  </header>
+
+  <main>
+    <!-- 왼쪽: 영상 -->
+    <section class="pane" id="paneLib">
+      <h2>① 영상 불러오기</h2>
+      <div id="drop">
+        <div class="row">
+          <input id="pathIn" placeholder="영상 경로를 붙여넣으세요" autocomplete="off" spellcheck="false">
+          <button class="primary" id="openBtn">열기</button>
+        </div>
+        <div class="small mute" style="margin-top:8px">
+          탐색기에서 파일을 <b>Shift+우클릭 → 경로로 복사</b> 한 뒤 붙여넣기.<br>
+          따옴표·대괄호 <code>[4기]</code>·한글·공백 모두 괜찮아요.
+        </div>
+      </div>
+      <div id="err"></div>
+
+      <h2 style="margin-top:22px">내 PC 영상 <span id="cnt" class="mute"></span></h2>
+      <div id="list"><div class="mute small">불러오는 중…</div></div>
+
+      <h2 style="margin-top:22px">검색하는 폴더</h2>
+      <div class="chips" id="folders"></div>
+      <div class="row" style="margin-top:8px">
+        <input id="folderIn" placeholder="폴더 추가 (예: D:\강의영상)" autocomplete="off" spellcheck="false">
+        <button id="addFolder">추가</button>
+      </div>
+    </section>
+
+    <!-- 가운데: 플레이어 -->
+    <section class="pane" id="paneStage">
+      <div class="topbar">
+        <div class="seg" id="viewSeg">
+          <button data-v="vertical" class="on">📱 쇼츠 9:16</button>
+          <button data-v="wide">🖥 원본</button>
+        </div>
+        <div class="seg" id="rateSeg">
+          <button data-r="0.75">0.75×</button><button data-r="1" class="on">1×</button><button data-r="1.5">1.5×</button><button data-r="2">2×</button>
+        </div>
+      </div>
+      <div id="stageWrap">
+        <div id="frame" class="vertical">
+          <video id="v" playsinline preload="metadata"></video>
+          <div id="empty"><div>영상을 열어 주세요<br><span class="small">PC는 왼쪽 · 폰은 아래 <b>영상</b> 탭</span></div></div>
+        </div>
+      </div>
+      <div id="controls">
+        <div id="bar"><div id="track"><div id="sel"></div><div id="fill"></div></div><div class="mk" id="mkIn"></div><div class="mk" id="mkOut"></div><div id="head"></div></div>
+        <div class="btns">
+          <button id="b-5">⏪ 5초</button>
+          <button id="bPlay" class="primary" style="min-width:90px">▶ 재생</button>
+          <button id="b+5">5초 ⏩</button>
+          <span id="time">0:00 / 0:00</span>
+        </div>
+        <div class="small mute hint-kbd" style="text-align:center;margin-top:8px">
+          <kbd>Space</kbd> 재생 · <kbd>←</kbd><kbd>→</kbd> 1초 · <kbd>Shift</kbd>+방향 5초 · <kbd>Alt</kbd>+방향 0.3초 · <kbd>I</kbd> 시작 · <kbd>O</kbd> 끝
+        </div>
+      </div>
+    </section>
+
+    <!-- 오른쪽: 구간 -->
+    <section class="pane" id="paneClips">
+      <h2>② 쇼츠 구간 만들기</h2>
+      <div class="stack">
+        <div class="mark">
+          <div class="card">
+            <div class="small mute">시작</div><div class="tv" id="tIn">--</div>
+            <button style="width:100%;margin-top:6px" id="setIn">지금 위치로 (I)</button>
+            <div class="nudge"><button data-n="in:-0.3">−0.3</button><button data-n="in:0.3">+0.3</button></div>
+          </div>
+          <div class="card">
+            <div class="small mute">끝</div><div class="tv" id="tOut">--</div>
+            <button style="width:100%;margin-top:6px" id="setOut">지금 위치로 (O)</button>
+            <div class="nudge"><button data-n="out:-0.3">−0.3</button><button data-n="out:0.3">+0.3</button></div>
+          </div>
+        </div>
+        <div class="row">
+          <button id="playSel" style="flex:1">▶ 구간 미리보기</button>
+          <button id="saveClip" class="primary" style="flex:1">＋ 구간 저장</button>
+        </div>
+        <div class="small mute" id="lenInfo"></div>
+      </div>
+
+      <h2 style="margin-top:24px">저장한 구간 <span id="clipCnt" class="mute"></span></h2>
+      <div id="clips"><div class="mute small">아직 없어요. 시작·끝을 정하고 저장하세요.</div></div>
+      <div class="small mute" style="margin-top:18px">※ 지금은 1단계라 이 브라우저에만 저장돼요. 자막·AI 추천·렌더는 다음 단계에서 붙습니다.</div>
+    </section>
+  </main>
+
+  <nav id="tabs">
+    <button data-tab="paneLib" class="on"><span class="i">🎞</span>영상</button>
+    <button data-tab="paneStage"><span class="i">▶️</span>재생</button>
+    <button data-tab="paneClips"><span class="i">✂️</span>구간</button>
+  </nav>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const v = $('#v');
+let cur = null;                    // 현재 영상 정보
+let tin = null, tout = null;       // 시작·끝 (초)
+let stopAt = null;                 // 구간 미리보기 종료 지점
+let selClip = null;
+
+/* ---------- 유틸 ---------- */
+const fmt = (t, d = 1) => {
+  if (t == null || isNaN(t)) return '--';
+  const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+  const ss = s.toFixed(d).padStart(d ? d + 3 : 2, '0');
+  return h ? `${h}:${String(m).padStart(2,'0')}:${ss}` : `${m}:${ss}`;
+};
+const size = b => b > 1e9 ? (b/1e9).toFixed(1)+'GB' : b > 1e6 ? (b/1e6).toFixed(0)+'MB' : Math.max(1,Math.round(b/1e3))+'KB';
+const el = (tag, props = {}, ...kids) => {
+  const e = Object.assign(document.createElement(tag), props);
+  kids.flat().forEach(k => e.append(k));
+  return e;
+};
+async function api(url, opt) {
+  const r = await fetch(url, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || '요청에 실패했습니다');
+  return j;
+}
+const post = (url, body) => api(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+const store = {
+  get(k, d){ try{ return JSON.parse(localStorage.getItem(k)) ?? d }catch{ return d } },
+  set(k, x){ try{ localStorage.setItem(k, JSON.stringify(x)) }catch{} }
+};
+function showErr(msg){ const e=$('#err'); e.textContent=msg||''; e.style.display=msg?'block':'none'; }
+function goTab(id){
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id===id));
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab===id));
+}
+
+/* ---------- 영상 목록 ---------- */
+async function loadList(){
+  try{
+    const {videos} = await api('/api/videos');
+    $('#cnt').textContent = videos.length ? `(${videos.length})` : '';
+    const box = $('#list'); box.replaceChildren();
+    if(!videos.length){ box.append(el('div',{className:'mute small',textContent:'영상을 못 찾았어요. 위에 경로를 붙여넣거나 폴더를 추가해 주세요.'})); return; }
+    videos.forEach(x => {
+      const b = el('button',{className:'vid'+(cur&&cur.id===x.id?' sel':'')},
+        el('div',{className:'n',textContent:x.name}),
+        el('div',{className:'m',textContent:`${size(x.size)} · ${x.folder}`}));
+      b.onclick = () => openById(x.id);
+      box.append(b);
+    });
+  }catch(e){ $('#list').textContent = e.message; }
+}
+async function loadFolders(){
+  const {scan_dirs} = await api('/api/config');
+  const box = $('#folders'); box.replaceChildren();
+  scan_dirs.forEach(d => {
+    const x = el('button',{textContent:'✕',title:'목록에서 제거'});
+    x.onclick = async () => { await api('/api/folders?path='+encodeURIComponent(d),{method:'DELETE'}); loadFolders(); loadList(); };
+    box.append(el('span',{className:'chip'}, d, x));
+  });
+}
+$('#addFolder').onclick = async () => {
+  try{ await post('/api/folders',{path:$('#folderIn').value}); $('#folderIn').value=''; showErr(''); await loadFolders(); loadList(); }
+  catch(e){ showErr(e.message); }
+};
+
+/* ---------- 영상 열기 ---------- */
+async function openVideo(info){
+  cur = info; tin = tout = null; stopAt = null;
+  v.src = '/media/' + info.id;
+  v.load();
+  $('#empty').style.display = 'none';
+  $('#nowTitle').textContent = info.name;
+  store.set('last', info.id);
+  const w = info.warning ? ' ⚠ '+info.warning : '';
+  if (w) showErr(info.warning); else showErr('');
+  renderMarks(); renderClips(); loadList();
+  goTab('paneStage');
+}
+async function openById(id){
+  try{ showErr(''); openVideo(await api('/api/video/'+id)); }catch(e){ showErr(e.message); }
+}
+async function openPath(){
+  const p = $('#pathIn').value.trim(); if(!p) return;
+  try{ showErr(''); openVideo(await post('/api/open',{path:p})); $('#pathIn').value=''; }
+  catch(e){ showErr(e.message); }
+}
+$('#openBtn').onclick = openPath;
+$('#pathIn').addEventListener('keydown', e => { if(e.key==='Enter') openPath(); });
+$('#pathIn').addEventListener('paste', () => setTimeout(openPath, 50)); // 붙여넣으면 바로 열기
+
+// 파일을 끌어다 놓으면: 브라우저는 경로를 알 수 없으니 안내만
+const drop = $('#drop');
+['dragover','dragenter'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if(f) showErr(`보안 때문에 브라우저는 파일의 전체 경로를 알려주지 않아요.\n"${f.name}" 의 경로를 복사해서 붙여넣거나, 있는 폴더를 '검색하는 폴더'에 추가해 주세요.`);
+});
+
+/* ---------- 재생 ---------- */
+const dur = () => isFinite(v.duration) ? v.duration : 0;
+function seek(t){ v.currentTime = Math.max(0, Math.min(dur() || t, t)); }
+function toggle(){ if(!cur) return; v.paused ? v.play() : v.pause(); }
+$('#bPlay').onclick = toggle;
+$('#b-5').onclick = () => seek(v.currentTime - 5);
+$('#b\\+5').onclick = () => seek(v.currentTime + 5);
+v.addEventListener('click', toggle);
+v.addEventListener('play', () => $('#bPlay').textContent = '⏸ 일시정지');
+v.addEventListener('pause', () => $('#bPlay').textContent = '▶ 재생');
+v.addEventListener('loadedmetadata', renderMarks);
+v.addEventListener('error', () => {
+  const ext = cur ? cur.name.split('.').pop().toLowerCase() : '';
+  showErr('이 브라우저가 영상을 재생하지 못해요.' + (['mkv','avi','wmv','flv','ts'].includes(ext) ? `\n${ext} 형식은 브라우저가 못 읽는 경우가 많아요. mp4 로 변환하면 돼요 (다음 단계에서 자동 변환을 붙일 수 있어요).` : '\n코덱 문제일 수 있어요.'));
+});
+v.addEventListener('timeupdate', () => {
+  const d = dur(), t = v.currentTime;
+  const pct = d ? t / d * 100 : 0;
+  $('#fill').style.width = pct + '%'; $('#head').style.left = pct + '%';
+  $('#time').textContent = `${fmt(t,1)} / ${fmt(d,0)}`;
+  if (stopAt != null && t >= stopAt) { v.pause(); stopAt = null; }
+});
+$('#viewSeg').onclick = e => {
+  const b = e.target.closest('button'); if(!b) return;
+  $('#viewSeg').querySelectorAll('button').forEach(x => x.classList.toggle('on', x===b));
+  $('#frame').className = b.dataset.v === 'wide' ? 'wide' : 'vertical';
+};
+$('#rateSeg').onclick = e => {
+  const b = e.target.closest('button'); if(!b) return;
+  $('#rateSeg').querySelectorAll('button').forEach(x => x.classList.toggle('on', x===b));
+  v.playbackRate = +b.dataset.r;
+};
+
+// 진행 바: 클릭·드래그로 이동 (마우스/터치 공통)
+const bar = $('#bar');
+function barSeek(e){
+  const r = bar.getBoundingClientRect();
+  seek((Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1)) * dur());
+}
+bar.addEventListener('pointerdown', e => { if(!cur) return; bar.setPointerCapture(e.pointerId); barSeek(e); bar.onpointermove = barSeek; });
+bar.addEventListener('pointerup', () => bar.onpointermove = null);
+
+/* ---------- 구간 표시 ---------- */
+function renderMarks(){
+  $('#tIn').textContent = fmt(tin, 2);
+  $('#tOut').textContent = fmt(tout, 2);
+  const d = dur();
+  const place = (id, t) => { const m=$(id); if(t==null||!d){ m.style.display='none'; return; } m.style.display='block'; m.style.left = (t/d*100)+'%'; };
+  place('#mkIn', tin); place('#mkOut', tout);
+  const s = $('#sel');
+  if (tin!=null && tout!=null && d && tout>tin){ s.style.display='block'; s.style.left=(tin/d*100)+'%'; s.style.width=((tout-tin)/d*100)+'%'; }
+  else s.style.display='none';
+  const L = $('#lenInfo');
+  if (tin!=null && tout!=null){
+    const len = tout - tin;
+    L.textContent = len <= 0 ? '⚠ 끝이 시작보다 앞이에요' : `길이 ${len.toFixed(1)}초` + (len>60 ? ' · ⚠ 쇼츠는 60초 이하 권장' : len<10 ? ' · 너무 짧을 수 있어요' : ' ✓');
+    L.style.color = len<=0||len>60 ? 'var(--warn)' : 'var(--ok)';
+  } else { L.textContent = '재생하다가 마음에 드는 곳에서 시작(I)·끝(O)을 눌러 주세요'; L.style.color=''; }
+}
+function setMark(which, t){ if(!cur) return; (which==='in') ? tin = Math.max(0,t) : tout = Math.max(0,t); renderMarks(); }
+$('#setIn').onclick = () => setMark('in', v.currentTime);
+$('#setOut').onclick = () => setMark('out', v.currentTime);
+document.querySelectorAll('[data-n]').forEach(b => b.onclick = () => {
+  const [w, dlt] = b.dataset.n.split(':'); const base = w==='in' ? tin : tout; if(base==null) return;
+  setMark(w, Math.round((base + +dlt)*100)/100);
+  seek(w==='in' ? (tin) : Math.max(0,tout-1.5)); // 조정한 지점 근처를 바로 보여줌
+});
+function playRange(a, b){ if(!cur||a==null||b==null||b<=a) return; stopAt = b; seek(a); v.play(); }
+$('#playSel').onclick = () => playRange(tin, tout);
+
+/* ---------- 저장한 구간 ---------- */
+const clipsKey = () => 'clips:' + (cur ? cur.id : '');
+function renderClips(){
+  const box = $('#clips'); box.replaceChildren();
+  const list = cur ? store.get(clipsKey(), []) : [];
+  $('#clipCnt').textContent = list.length ? `(${list.length})` : '';
+  if(!list.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 시작·끝을 정하고 저장하세요.'})); return; }
+  list.forEach((c, i) => {
+    const play = el('button',{textContent:'▶',title:'재생'}); play.onclick = e => { e.stopPropagation(); playRange(c.start,c.end); goTab('paneStage'); };
+    const del = el('button',{textContent:'🗑',title:'삭제',className:'ghost'});
+    del.onclick = e => { e.stopPropagation(); list.splice(i,1); store.set(clipsKey(), list); renderClips(); };
+    const row = el('div',{className:'card clip'+(selClip===c.id?' sel':'')},
+      el('div',{className:'t'}, el('b',{textContent:`#${i+1}  `}), `${fmt(c.start,1)} ~ ${fmt(c.end,1)}`, el('span',{className:'mute',textContent:`  (${(c.end-c.start).toFixed(1)}초)`})),
+      play, del);
+    row.onclick = () => { selClip = c.id; tin = c.start; tout = c.end; renderMarks(); renderClips(); seek(c.start); };  // 눌러서 다시 편집
+    box.append(row);
+  });
+}
+$('#saveClip').onclick = () => {
+  if(!cur) return showErr('먼저 영상을 열어 주세요.');
+  if(tin==null || tout==null || tout<=tin) return showErr('시작과 끝을 먼저 정해 주세요. (끝이 시작보다 뒤여야 해요)');
+  showErr('');
+  const list = store.get(clipsKey(), []);
+  const existing = list.find(c => c.id===selClip);
+  if (existing) { existing.start = tin; existing.end = tout; }   // 불러온 구간이면 덮어쓰기
+  else { const c = {id: Date.now().toString(36), start: tin, end: tout}; list.push(c); selClip = c.id; }
+  list.sort((a,b) => a.start - b.start);
+  store.set(clipsKey(), list); renderClips();
+};
+
+/* ---------- 키보드 ---------- */
+document.addEventListener('keydown', e => {
+  if (['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
+  const step = e.altKey ? 0.3 : e.shiftKey ? 5 : 1;
+  if (e.code==='Space'){ e.preventDefault(); toggle(); }
+  else if (e.key==='ArrowLeft'){ e.preventDefault(); seek(v.currentTime - step); }
+  else if (e.key==='ArrowRight'){ e.preventDefault(); seek(v.currentTime + step); }
+  else if (e.key==='i'||e.key==='I') setMark('in', v.currentTime);
+  else if (e.key==='o'||e.key==='O') setMark('out', v.currentTime);
+});
+
+/* ---------- 모바일 탭 ---------- */
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => goTab(b.dataset.tab));
+const mq = matchMedia('(max-width:900px)');
+function layout(){ if(mq.matches){ if(!document.querySelector('.pane.active')) goTab('paneLib'); } else document.querySelectorAll('.pane').forEach(p => p.classList.remove('active')); }
+mq.addEventListener('change', layout); layout();
+
+/* ---------- 시작 ---------- */
+loadFolders(); loadList(); renderMarks();
+const last = store.get('last'); if (last) api('/api/video/'+last).then(openVideo).catch(() => {});
+</script>
+</body>
+</html>
