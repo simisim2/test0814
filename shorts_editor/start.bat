@@ -17,11 +17,14 @@ if errorlevel 1 (
   echo.
 )
 
-if not exist .venv (
+rem OneDrive 동기화를 피하려고 가상환경·작업 데이터는 C드라이브 로컬에 둡니다.
+set "LOCAL_HOME=%LOCALAPPDATA%\shorts_editor"
+if not defined SHORTS_WORK_DIR set "SHORTS_WORK_DIR=%LOCAL_HOME%\work"
+if not exist "%LOCAL_HOME%\venv" (
   echo 처음 한 번만 준비 중입니다...
-  python -m venv .venv
+  python -m venv "%LOCAL_HOME%\venv"
 )
-call .venv\Scripts\activate.bat
+call "%LOCAL_HOME%\venv\Scripts\activate.bat"
 pip install -q -r requirements.txt
 
 python run.py

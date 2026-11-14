@@ -22,6 +22,7 @@ button{white-space:nowrap;flex-shrink:0}
 button.primary{color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;font-weight:700}
 button.ghost{background:transparent}
 input{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
 input:focus{outline:2px solid var(--accent2);border-color:transparent}
 .mute{color:var(--mute)} .small{font-size:12.5px}
 
@@ -126,6 +127,26 @@ kbd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
       </div>
       <div id="err"></div>
 
+      <h2 style="margin-top:22px">③ 자막 만들기</h2>
+      <div class="card stack" id="subBox">
+        <div class="small mute">현재 영상의 말을 글자로 바꿔요. (처음엔 모델 다운로드로 오래 걸려요)</div>
+        <select id="subModel"></select>
+        <div class="row">
+          <input id="subFrom" type="number" min="0" step="1" placeholder="시작(분)" title="비우면 처음부터">
+          <input id="subTo" type="number" min="0" step="1" placeholder="끝(분)" title="비우면 끝까지">
+        </div>
+        <div class="small mute">분석 구간(선택): 비우면 영상 전체를 해요. 테스트는 2~3분만 추천!</div>
+        <div class="row">
+          <button class="primary" id="subStart" style="flex:1">자막 생성</button>
+          <button id="subCancel" style="display:none">취소</button>
+        </div>
+        <div id="subProg" style="display:none">
+          <div style="height:8px;background:var(--bg);border-radius:99px;overflow:hidden"><div id="subFill" style="height:100%;width:0;background:var(--accent2);transition:width .3s"></div></div>
+          <div class="small mute" id="subMsg" style="margin-top:6px"></div>
+        </div>
+        <div id="subErr" class="small" style="display:none;color:#ffb3b3;white-space:pre-wrap"></div>
+      </div>
+
       <h2 style="margin-top:22px">내 PC 영상 <span id="cnt" class="mute"></span></h2>
       <div id="list"><div class="mute small">불러오는 중…</div></div>
 
@@ -193,7 +214,9 @@ kbd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 
       <h2 style="margin-top:24px">저장한 구간 <span id="clipCnt" class="mute"></span></h2>
       <div id="clips"><div class="mute small">아직 없어요. 시작·끝을 정하고 저장하세요.</div></div>
-      <div class="small mute" style="margin-top:18px">※ 지금은 1단계라 이 브라우저에만 저장돼요. 자막·AI 추천·렌더는 다음 단계에서 붙습니다.</div>
+      <h2 style="margin-top:24px">자막 <span id="trCnt" class="mute"></span></h2>
+      <div id="tr"><div class="mute small">아직 없어요. 왼쪽에서 자막을 생성하세요.</div></div>
+      <div class="small mute" style="margin-top:18px">※ 구간은 아직 이 브라우저에만 저장돼요. AI 추천·렌더는 다음 단계에서 붙습니다.</div>
     </section>
   </main>
 
@@ -283,6 +306,7 @@ async function openVideo(info){
   const w = info.warning ? ' ⚠ '+info.warning : '';
   if (w) showErr(info.warning); else showErr('');
   renderMarks(); renderClips(); loadList();
+  loadTranscript(); subShow(false); pollSub();
   goTab('paneStage');
 }
 async function openById(id){
@@ -405,6 +429,75 @@ $('#saveClip').onclick = () => {
   list.sort((a,b) => a.start - b.start);
   store.set(clipsKey(), list); renderClips();
 };
+
+/* ---------- 자막 (2단계) ---------- */
+let segs = [], segEls = [], activeSeg = -1, pollTimer = null;
+function subShow(on){ $('#subProg').style.display = on ? 'block' : 'none'; $('#subCancel').style.display = on ? '' : 'none'; $('#subStart').disabled = on; }
+function subError(msg){ const e=$('#subErr'); e.textContent=msg||''; e.style.display=msg?'block':'none'; }
+function renderTranscript(list){
+  segs = list; segEls = []; activeSeg = -1;
+  const box = $('#tr'); box.replaceChildren();
+  $('#trCnt').textContent = list.length ? `(${list.length}문장)` : '';
+  if(!list.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 왼쪽에서 자막을 생성하세요.'})); return; }
+  list.forEach(s => {
+    const row = el('div',{className:'card',style:'margin-top:6px;padding:8px 10px;cursor:pointer'},
+      el('div',{className:'small mute',textContent:`${fmt(s.start,1)} ~ ${fmt(s.end,1)}`}),
+      el('div',{textContent:s.text}));
+    row.onclick = () => { seek(s.start); };
+    segEls.push(row); box.append(row);
+  });
+}
+async function loadTranscript(){
+  renderTranscript([]);
+  if(!cur) return;
+  try{ renderTranscript((await api('/api/transcript/'+cur.id)).segments); }catch{}
+}
+function applyStatus(st){
+  subError('');
+  if(st.state === 'running'){
+    subShow(true);
+    $('#subFill').style.width = (st.progress*100)+'%';
+    $('#subMsg').textContent = `${st.stage} · ${Math.round(st.progress*100)}% · ${st.count}문장 · ${Math.round(st.elapsed)}초 경과`;
+    return true;
+  }
+  subShow(false);
+  if(st.state === 'error') subError(st.message || '자막 생성에 실패했어요.');
+  if(st.state === 'cancelled') subError('취소했어요.');
+  if(st.state === 'done') loadTranscript();
+  return false;
+}
+function pollSub(){
+  clearInterval(pollTimer);
+  const id = cur && cur.id; if(!id) return;
+  const tick = async () => {
+    if(!cur || cur.id !== id){ clearInterval(pollTimer); return; }
+    try{ if(!applyStatus(await api('/api/transcribe/'+id))) clearInterval(pollTimer); }
+    catch(e){ clearInterval(pollTimer); subError(e.message); }
+  };
+  tick(); pollTimer = setInterval(tick, 1000);
+}
+$('#subStart').onclick = async () => {
+  if(!cur) return subError('먼저 영상을 열어 주세요.');
+  const f = parseFloat($('#subFrom').value), t = parseFloat($('#subTo').value);
+  try{
+    await post('/api/transcribe', {id:cur.id, model:$('#subModel').value,
+      start: isNaN(f) ? 0 : f*60, end: isNaN(t) ? null : t*60});
+    pollSub();
+  }catch(e){ subError(e.message); }
+};
+$('#subCancel').onclick = async () => { if(cur) { await api(`/api/transcribe/${cur.id}/cancel`,{method:'POST'}).catch(()=>{}); } };
+v.addEventListener('timeupdate', () => {
+  const t = v.currentTime;
+  const i = segs.findIndex(s => t >= s.start && t < s.end);
+  if(i === activeSeg) return;
+  if(segEls[activeSeg]) segEls[activeSeg].style.borderColor = '';
+  activeSeg = i;
+  if(i >= 0){ segEls[i].style.borderColor = 'var(--accent)'; segEls[i].scrollIntoView({block:'nearest'}); }
+});
+api('/api/transcribe/models').then(m => {
+  m.models.forEach(x => $('#subModel').append(el('option',{value:x.name,textContent:`${x.name} — ${x.label}`})));
+  $('#subModel').value = m.default;
+});
 
 /* ---------- 키보드 ---------- */
 document.addEventListener('keydown', e => {

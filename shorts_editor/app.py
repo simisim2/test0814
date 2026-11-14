@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from transcribe import DEFAULT_MODEL, MODELS, Transcriber
+
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
 WORK = Path(os.environ.get("SHORTS_WORK_DIR", BASE / "work")).expanduser()
@@ -207,6 +209,58 @@ def api_remove_folder(path: str):
     cfg["scan_dirs"] = [d for d in cfg["scan_dirs"] if d != path]
     _save(CONFIG_FILE, cfg)
     return {"scan_dirs": cfg["scan_dirs"]}
+
+
+# ---------- 2단계: 자막 ----------
+transcriber = Transcriber(WORK)
+
+
+def _video_path(vid: str) -> Path:
+    path = registry.get(vid)
+    if not path or not Path(path).is_file():
+        raise HTTPException(404, "영상을 찾을 수 없습니다. 목록에서 다시 선택해 주세요.")
+    return Path(path)
+
+
+class TranscribeReq(BaseModel):
+    id: str
+    model: str = DEFAULT_MODEL
+    start: float = 0.0
+    end: Optional[float] = None
+
+
+@app.get("/api/transcribe/models")
+def api_models():
+    return {"models": [{"name": k, "label": v} for k, v in MODELS.items()], "default": DEFAULT_MODEL}
+
+
+@app.post("/api/transcribe")
+def api_transcribe(req: TranscribeReq):
+    video = _video_path(req.id)
+    try:
+        return transcriber.start(req.id, video, req.model, req.start, req.end)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/transcribe/{vid}")
+def api_transcribe_status(vid: str):
+    return transcriber.status(vid)
+
+
+@app.post("/api/transcribe/{vid}/cancel")
+def api_transcribe_cancel(vid: str):
+    return transcriber.cancel(vid)
+
+
+@app.get("/api/transcript/{vid}")
+def api_transcript(vid: str):
+    r = transcriber.result(vid)
+    if not r:
+        raise HTTPException(404, "아직 자막이 없습니다.")
+    return r
 
 
 @app.get("/media/{vid}")
