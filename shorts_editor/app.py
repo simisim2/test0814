@@ -13,13 +13,14 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from recommend import MODEL, RecommendError, Recommender, has_key, load_env
-from render import LAYOUTS, THEMES, RenderError, Renderer, clean_design, list_fonts, preview_png
+from music import MusicError, MusicLib
+from recommend import MODEL, RecommendError, Recommender, has_key, load_env, recommend_music
+from render import LAYOUTS, THEMES, TRANSITIONS, RenderError, Renderer, clean_design, list_fonts, preview_png
 from transcribe import DEFAULT_MODEL, MODELS, Transcriber
 
 BASE = Path(__file__).resolve().parent
@@ -332,6 +333,18 @@ class Clip(BaseModel):
     crop_x: int = 50
     font: str = ""
     sub_font: str = ""
+    # 이어붙이기·전환·음악·페이드 (검증은 render.clean_design)
+    extra: list[dict] = []
+    trans: str = "fade"
+    trans_dur: float = 0.5
+    music: str = ""
+    music_vol: int = 25
+    music_fade_in: float = 1.0
+    music_fade_out: float = 2.0
+    music_start: float = 0.0
+    duck: bool = True
+    mute_orig: bool = False
+    vfade: float = 0.0
 
 
 class ClipsReq(BaseModel):
@@ -403,16 +416,39 @@ def api_render_options():
         "fonts": [{"id": f["id"], "label": f["label"], "recommended": f["recommended"], "mine": f["mine"]}
                   for f in list_fonts()],
         "fonts_dir": str(BASE / "fonts"),
+        "transitions": [{"id": k, "label": v} for k, v in TRANSITIONS.items()],
     }
+
+
+def _resolve_parts(vid: str, clip: dict) -> list[dict]:
+    """메인 구간 + 이어붙일 구간들을 (영상 파일, 시작, 끝, 자막) 목록으로 푼다."""
+    parts = [{"video": _video_path(vid), "start": clip["start"], "end": clip["end"], "segments": _segments(vid)}]
+    for i, ref in enumerate(clean_design(clip)["extra"], start=1):
+        f = _clips_file(ref["vid"])
+        c = next((x for x in _load(f, {"clips": []})["clips"] if x["id"] == ref["id"]), None)
+        if not c:
+            raise HTTPException(404, f"이어붙인 {i}번째 구간을 찾을 수 없어요. 삭제됐다면 목록에서 빼 주세요.")
+        parts.append({"video": _video_path(ref["vid"]), "start": c["start"], "end": c["end"],
+                      "segments": _segments(ref["vid"])})
+    return parts
+
+
+def _music_path(design: dict) -> Optional[Path]:
+    if not design["music"]:
+        return None
+    try:
+        return music.path(design["music"])
+    except MusicError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/render/preview/{vid}/{clip_id}")
 def api_render_preview(vid: str, clip_id: str):
-    video = _video_path(vid)
     clip = _find_clip(vid, clip_id)
+    part = _resolve_parts(vid, clip)[0]
     out = PREVIEW_DIR / f"{vid}_{clip_id}.png"
     try:
-        preview_png(video, clean_design(clip), _segments(vid), clip["start"], clip["end"], out)
+        preview_png(part, clean_design(clip), out)
     except RenderError as e:
         raise HTTPException(500, str(e))
     return FileResponse(out, media_type="image/png", headers={"Cache-Control": "no-store"})
@@ -420,10 +456,11 @@ def api_render_preview(vid: str, clip_id: str):
 
 @app.post("/api/render/{vid}/{clip_id}")
 def api_render_start(vid: str, clip_id: str):
-    video = _video_path(vid)
     clip = _find_clip(vid, clip_id)
+    parts = _resolve_parts(vid, clip)
+    mpath = _music_path(clean_design(clip))
     try:
-        return renderer.start(vid, clip_id, video, clip, _segments(vid))
+        return renderer.start(vid, clip_id, parts, clip, mpath)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
 
@@ -454,6 +491,97 @@ def api_out(vid: str, clip_id: str, download: int = 0):
         raise HTTPException(404, "아직 만들어진 쇼츠가 없어요.")
     name = f"shorts_{clip_id}.mp4" if download else None
     return FileResponse(p, media_type="video/mp4", filename=name, headers={"Cache-Control": "no-store"})
+
+
+# ---------- 배경음악 · 구간 모아보기 ----------
+music = MusicLib(WORK)
+
+
+@app.get("/api/all_clips")
+def api_all_clips():
+    """이어붙일 구간을 고를 수 있도록, 모든 영상의 저장된 구간을 모아 보여준다."""
+    out = []
+    for f in sorted(CLIPS_DIR.glob("*.json")):
+        if not re.fullmatch(r"[0-9a-f]{12}", f.stem):
+            continue
+        path = registry.get(f.stem)
+        name = Path(path).name if path else f.stem
+        for c in _load(f, {"clips": []})["clips"]:
+            out.append({"vid": f.stem, "video": name, "id": c["id"], "start": c["start"], "end": c["end"],
+                        "title": c.get("title", "")})
+    return {"clips": out}
+
+
+@app.get("/api/music")
+def api_music_list():
+    return {"music": music.list(), "has_key": has_key()}
+
+
+@app.post("/api/music/upload")
+async def api_music_upload(request: Request, name: str):
+    try:
+        return await music.save_stream(name, request.stream())
+    except MusicError as e:
+        raise HTTPException(400, str(e))
+
+
+class UrlReq(BaseModel):
+    url: str
+
+
+@app.post("/api/music/import")
+def api_music_import(req: UrlReq):
+    try:
+        return music.import_url(req.url)
+    except MusicError as e:
+        raise HTTPException(400, str(e))
+
+
+class TagsReq(BaseModel):
+    tags: str = ""
+
+
+@app.put("/api/music/{name}/tags")
+def api_music_tags(name: str, req: TagsReq):
+    try:
+        music.set_tags(name, req.tags)
+    except MusicError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/music/{name}")
+def api_music_delete(name: str):
+    try:
+        music.delete(name)
+    except MusicError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/music/file/{name}")
+def api_music_file(name: str):
+    try:
+        return FileResponse(music.path(name))
+    except MusicError as e:
+        raise HTTPException(404, str(e))
+
+
+class MusicRecReq(BaseModel):
+    id: str
+    clip_id: str
+
+
+@app.post("/api/music/recommend")
+def api_music_recommend(req: MusicRecReq):
+    clip = _find_clip(req.id, req.clip_id)
+    parts = _resolve_parts(req.id, clip)
+    text = "\n".join(sg["text"] for p in parts for sg in p["segments"]
+                     if sg["end"] > p["start"] and sg["start"] < p["end"])
+    try:
+        return recommend_music(text, music.list())
+    except RecommendError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/media/{vid}")

@@ -154,19 +154,19 @@ def snap_and_validate(raw: list[dict], segments: list[dict]) -> list[dict]:
 
 
 # ---------- Claude 호출 ----------
-def call_claude(segments: list[dict], count: int, hint: str) -> list[dict]:
+def _send(system: str, user: str, schema: dict, effort: str = "high", max_tokens: int = 16000) -> dict:
+    """Claude 에 구조화 출력(JSON)을 요청하고 파싱해서 돌려준다. 오류는 쉬운 한국어 RecommendError 로."""
     import anthropic
 
     if not has_key():
         raise RecommendError(NO_KEY_MSG)
-
     client = anthropic.Anthropic()
     kwargs = dict(
         model=MODEL,
-        max_tokens=16000,
-        system=SYSTEM,
-        output_config={"effort": "high", "format": {"type": "json_schema", "schema": SCHEMA}},
-        messages=[{"role": "user", "content": build_user_prompt(segments, count, hint)}],
+        max_tokens=max_tokens,
+        system=system,
+        output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": user}],
     )
     try:
         # 안전 분류기가 거절하면 서버가 대체 모델로 이어서 처리하도록 한다.
@@ -198,12 +198,78 @@ def call_claude(segments: list[dict], count: int, hint: str) -> list[dict]:
     if resp.stop_reason == "refusal":
         raise RecommendError("Claude 가 이 내용의 처리를 거절했어요. 다른 영상으로 시도해 보세요.")
     if resp.stop_reason == "max_tokens":
-        raise RecommendError("답이 너무 길어 잘렸어요. 후보 개수를 줄여 다시 시도해 주세요.")
+        raise RecommendError("답이 너무 길어 잘렸어요. 개수를 줄여 다시 시도해 주세요.")
     text = next((b.text for b in resp.content if b.type == "text"), "")
     try:
-        return json.loads(text)["candidates"]
-    except (ValueError, KeyError, TypeError):
+        return json.loads(text)
+    except ValueError:
         raise RecommendError("Claude 의 답을 읽지 못했어요. 다시 시도해 주세요.")
+
+
+def call_claude(segments: list[dict], count: int, hint: str) -> list[dict]:
+    data = _send(SYSTEM, build_user_prompt(segments, count, hint), SCHEMA)
+    try:
+        return data["candidates"]
+    except (KeyError, TypeError):
+        raise RecommendError("Claude 의 답을 읽지 못했어요. 다시 시도해 주세요.")
+
+
+# ---------- 배경음악 추천 ----------
+MUSIC_SYSTEM = """당신은 유튜브 쇼츠의 배경음악을 고르는 편집자입니다.
+입력은 쇼츠로 만들 구간의 말(자막)과, 사용자가 가진 음악 목록입니다.
+
+해야 할 일:
+1) 이 구간의 분위기(mood)를 한국어 한 줄로 요약한다. (예: 차분하고 따뜻한 동기부여)
+2) 무료 음원 사이트에서 검색할 영어 키워드 4~6개를 준다. (예: "calm piano", "uplifting acoustic", "soft inspirational")
+3) 목록에 있는 곡 중 어울리는 순서대로 최대 3곡을 고르고 이유를 한 문장으로 쓴다. 목록에 없는 이름은 절대 만들지 않는다.
+   어울리는 곡이 없으면 picks 를 빈 배열로 둔다.
+4) 말소리를 방해하지 않을 배경음악 크기(volume, 10~40)를 제안한다. 말이 빠르고 중요한 내용이면 낮게.
+
+음악은 말보다 앞서지 않는 잔잔한 배경이 기본입니다."""
+
+MUSIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mood": {"type": "string"},
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "volume": {"type": "integer"},
+        "picks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "reason": {"type": "string"}},
+                "required": ["name", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["mood", "keywords", "volume", "picks"],
+    "additionalProperties": False,
+}
+
+
+def recommend_music(transcript: str, library: list[dict]) -> dict:
+    """library: [{name, tags, duration}] → {mood, keywords, volume, picks:[{name, reason}]}"""
+    text = transcript.strip()
+    if not text:
+        raise RecommendError("이 구간에는 자막이 없어요. 먼저 ③ 에서 자막을 만들어 주세요.")
+    if library:
+        lib = "\n".join(
+            f"- {x['name']}" + (f" (태그: {x['tags']})" if x.get("tags") else "")
+            + (f" [{int(x['duration'])}초]" if x.get("duration") else "")
+            for x in library[:80])
+    else:
+        lib = "(아직 올려 둔 음악이 없음)"
+    user = f"<구간 자막>\n{text[:6000]}\n</구간 자막>\n\n<내 음악 목록>\n{lib}\n</내 음악 목록>"
+    data = _send(MUSIC_SYSTEM, user, MUSIC_SCHEMA, effort="medium", max_tokens=4000)
+    names = {x["name"] for x in library}
+    picks = [p for p in data.get("picks", []) if p.get("name") in names][:3]   # 목록에 없는 곡은 버린다
+    return {
+        "mood": str(data.get("mood", ""))[:120],
+        "keywords": [str(k)[:40] for k in data.get("keywords", [])][:6],
+        "volume": max(10, min(40, int(data.get("volume", 25) or 25))),
+        "picks": [{"name": p["name"], "reason": str(p.get("reason", ""))[:200]} for p in picks],
+    }
 
 
 # ---------- 작업 관리 ----------

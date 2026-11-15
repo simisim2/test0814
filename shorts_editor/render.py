@@ -31,8 +31,17 @@ THEMES = {
     "sunset":   dict(label="선셋",     bg=("#ff7a45", "#c2185b"), text="#ffffff", accent="#fff1a8", box="#ffffff", boxtext="#7a1236"),
     "mono":     dict(label="모노",     bg=("#0b0b0b", "#2a2a2a"), text="#ffffff", accent="#00e0a4", box="#ffffff", boxtext="#0b0b0b"),
 }
+TRANSITIONS = {
+    "none": "전환 없음 (그냥 이어붙이기)", "fade": "부드럽게 겹치기", "fadeblack": "검정으로 넘어가기",
+    "dissolve": "디졸브", "wipeleft": "와이프 (왼쪽으로 닦기)", "slideleft": "슬라이드 (왼쪽으로 밀기)",
+    "circleopen": "원형으로 열기",
+}
+MAX_EXTRA = 8
 DEFAULT_DESIGN = dict(kicker="", lines=[], footer="", layout="card", theme="midnight", accent="",
-                      subs=True, crop_x=50, font="", sub_font="")
+                      subs=True, crop_x=50, font="", sub_font="",
+                      extra=[], trans="fade", trans_dur=0.5,
+                      music="", music_vol=25, music_fade_in=1.0, music_fade_out=2.0, music_start=0.0,
+                      duck=True, mute_orig=False, vfade=0.0)
 
 # ---------------------------------------------------------------- 글꼴
 BASE = Path(__file__).resolve().parent
@@ -146,6 +155,30 @@ def clean_design(d: dict) -> dict:
         out["crop_x"] = max(0, min(100, int(d.get("crop_x", 50))))
     except (TypeError, ValueError):
         out["crop_x"] = 50
+    extra = []
+    for e in (d.get("extra") or [])[:MAX_EXTRA]:
+        if isinstance(e, dict) and re.fullmatch(r"[0-9a-f]{12}", str(e.get("vid", ""))) \
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", str(e.get("id", ""))):
+            extra.append({"vid": str(e["vid"]), "id": str(e["id"])})
+    out["extra"] = extra
+    out["trans"] = d.get("trans") if d.get("trans") in TRANSITIONS else "fade"
+
+    def num(key, lo, hi, default):
+        try:
+            v = float(d.get(key, default))
+            return min(max(v, lo), hi) if v == v else default
+        except (TypeError, ValueError):
+            return default
+
+    out["trans_dur"] = round(num("trans_dur", 0.2, 1.5, 0.5), 2)
+    out["music"] = re.sub(r"[^0-9A-Za-z._ 가-힣()\[\]-]", "", str(d.get("music", "")))[:120]
+    out["music_vol"] = int(num("music_vol", 0, 100, 25))
+    out["music_fade_in"] = round(num("music_fade_in", 0, 10, 1.0), 2)
+    out["music_fade_out"] = round(num("music_fade_out", 0, 10, 2.0), 2)
+    out["music_start"] = round(num("music_start", 0, 3600, 0.0), 2)
+    out["duck"] = bool(d.get("duck", True))
+    out["mute_orig"] = bool(d.get("mute_orig", False))
+    out["vfade"] = round(num("vfade", 0, 3, 0.0), 2)
     out["font"] = re.sub(r"[^0-9a-z._ -]", "", str(d.get("font", "")).lower())[:80]
     out["sub_font"] = re.sub(r"[^0-9a-z._ -]", "", str(d.get("sub_font", "")).lower())[:80]
     return out
@@ -265,18 +298,20 @@ def _ass_time(t: float) -> str:
     return f"{int(h)}:{int(m):02d}:{s:05.2f}"
 
 
-def make_ass(segments: list[dict], start: float, end: float, family: str, layout: str, work: Path,
-             footer_top: Optional[int] = None) -> Optional[Path]:
+def make_ass(spec: list, family: str, layout: str, work: Path, footer_top: Optional[int] = None) -> Optional[Path]:
+    """spec: [(segments, 구간시작, 구간끝, 최종영상에서의 시작시각), ...] — 이어붙인 전체 시간축으로 자막을 만든다."""
     rows = []
-    for s in segments:
-        a, b = max(s["start"], start), min(s["end"], end)
-        if b - a < 0.15:
-            continue
-        text = str(s["text"]).replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ").strip()
-        if text:
-            rows.append(f"Dialogue: 0,{_ass_time(a - start)},{_ass_time(b - start)},Default,,0,0,0,,{text}")
+    for segments, start, end, base in spec:
+        for s in segments:
+            a, b = max(s["start"], start), min(s["end"], end)
+            if b - a < 0.15:
+                continue
+            text = str(s["text"]).replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ").strip()
+            if text:
+                rows.append((base + a - start, base + b - start, text))
     if not rows:
         return None
+    rows.sort()
     margin_v = 520 if layout == "card" else 330
     if footer_top and layout != "card":
         margin_v = max(margin_v, H - footer_top + 40)   # 하단 문구 박스 바로 위
@@ -286,65 +321,169 @@ def make_ass(segments: list[dict], start: float, end: float, family: str, layout
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, "
         "Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{family},64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,1,2,90,90,{margin_v},1\n\n"
-        "[Events]\nFormat: Layer, Start, End, Style, MarginL, MarginR, MarginV, Effect, Text\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
-    # 위 Format 은 ass 표준(…, Style, Name, MarginL, …)과 맞추기 위해 Name 열을 포함해 다시 쓴다
-    head = head.replace("Format: Layer, Start, End, Style, MarginL, MarginR, MarginV, Effect, Text",
-                        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+    lines = [f"Dialogue: 0,{_ass_time(a)},{_ass_time(b)},Default,,0,0,0,,{t}" for a, b, t in rows]
     p = work / "subs.ass"
-    p.write_text(head + "\n".join(rows) + "\n", encoding="utf-8")
+    p.write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
     return p
 
 
+# ---------------------------------------------------------------- 이어붙이기 계획
+def plan(parts: list[dict], design: dict) -> tuple[float, float, list[float]]:
+    """(전환 길이 d, 전체 길이, 각 구간이 최종 영상에서 시작하는 시각)"""
+    n = len(parts)
+    durs = [p["end"] - p["start"] for p in parts]
+    d = float(design["trans_dur"]) if (n > 1 and design["trans"] != "none") else 0.0
+    if d > 0:
+        d = min(d, min(durs) / 2 - 0.05)          # 너무 짧은 구간이면 전환도 짧게
+        if d < 0.1:
+            d = 0.0
+    bases, t = [], 0.0
+    for du in durs:
+        bases.append(t)
+        t += du - d
+    return d, sum(durs) - (n - 1) * d, bases
+
+
+def probe_has_audio(path: Path) -> bool:
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                            "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=30)
+        return bool(r.stdout.strip())
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------- ffmpeg
-def build_cmd(video: Path, design: dict, start: float, dur: float, has_bg: bool, has_ass: bool,
-              out_name: str, preview: bool) -> list[str]:
-    layout = design["layout"]
-    cmd = ["ffmpeg", "-y", "-v", "error", "-progress", "pipe:1", "-nostats",
-           "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(video)]
+def build_cmd(parts: list[dict], design: dict, d: float, total: float, has_bg: bool, has_ass: bool,
+              music: Optional[Path], out_name: str, preview: bool) -> list[str]:
+    layout, n = design["layout"], len(parts)
+    cmd = ["ffmpeg", "-y", "-v", "error", "-progress", "pipe:1", "-nostats"]
+    for p in parts:
+        cmd += ["-ss", f"{p['start']:.3f}", "-t", f"{p['end'] - p['start']:.3f}", "-i", str(p["video"])]
+    idx = n
+    bg_i = top_i = mus_i = None
     if has_bg:
         cmd += ["-loop", "1", "-framerate", "30", "-i", "bg.png"]
+        bg_i, idx = idx, idx + 1
     cmd += ["-loop", "1", "-framerate", "30", "-i", "top.png"]
-    top_idx = 2 if has_bg else 1
+    top_i, idx = idx, idx + 1
+    if music and not preview:
+        cmd += ["-stream_loop", "-1", "-ss", f"{design['music_start']:.2f}", "-i", str(music)]
+        mus_i = idx
 
-    if layout == "card":
-        g = (f"[0:v]scale=1080:900:force_original_aspect_ratio=decrease,setsar=1,fps=30[v];"
-             f"[1:v][v]overlay=x=(W-w)/2:y=560+(900-h)/2:shortest=1[a];")
-        last = "a"
-    elif layout == "fill":
-        cx = design["crop_x"] / 100
-        g = (f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-             f"crop=1080:1920:x='(iw-ow)*{cx}':y='(ih-oh)/2',setsar=1,fps=30[a];")
-        last = "a"
-    else:  # blur
-        g = ("[0:v]fps=30,split[s1][s2];"
-             "[s1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=28:4,eq=brightness=-0.12[bgv];"
-             "[s2]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];"
-             "[bgv][fg]overlay=x=(W-w)/2:y=(H-h)/2:shortest=1[a];")
-        last = "a"
-    g += f"[{last}][{top_idx}:v]overlay=0:0:shortest=1[b];"
-    g += "[b]ass=filename=subs.ass:fontsdir=.[c];" if has_ass else "[b]null[c];"
-    g += "[c]format=yuv420p[out]"
-    cmd += ["-filter_complex", g, "-map", "[out]"]
+    g: list[str] = []
+
+    def fan(src: int, tag: str) -> list[str]:
+        """같은 그림을 구간 수만큼 복제한 입력 라벨 목록"""
+        if n == 1:
+            return [f"[{src}:v]"]
+        g.append(f"[{src}:v]split={n}" + "".join(f"[{tag}{i}]" for i in range(n)) + ";")
+        return [f"[{tag}{i}]" for i in range(n)]
+
+    bgl = fan(bg_i, "bg") if bg_i is not None else []
+    topl = fan(top_i, "tp")
+    cx = design["crop_x"] / 100
+    for i in range(n):
+        if layout == "card":
+            g.append(f"[{i}:v]scale=1080:900:force_original_aspect_ratio=decrease,setsar=1,fps=30[v{i}];")
+            g.append(f"{bgl[i]}[v{i}]overlay=x=(W-w)/2:y=560+(900-h)/2:shortest=1[c{i}];")
+        elif layout == "fill":
+            g.append(f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                     f"crop=1080:1920:x='(iw-ow)*{cx}':y='(ih-oh)/2',setsar=1,fps=30[c{i}];")
+        else:
+            g.append(f"[{i}:v]fps=30,split[sa{i}][sb{i}];"
+                     f"[sa{i}]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=28:4,eq=brightness=-0.12[bv{i}];"
+                     f"[sb{i}]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg{i}];"
+                     f"[bv{i}][fg{i}]overlay=x=(W-w)/2:y=(H-h)/2:shortest=1[c{i}];")
+        g.append(f"[c{i}]{topl[i]}overlay=0:0:shortest=1,format=yuv420p,setpts=PTS-STARTPTS[f{i}];")
+
+    # 구간 이어붙이기 (전환)
+    if n == 1:
+        cur = "f0"
+    elif d == 0:
+        g.append("".join(f"[f{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[vcat];")
+        cur = "vcat"
+    else:
+        cur, off = "f0", parts[0]["end"] - parts[0]["start"] - d
+        for i in range(1, n):
+            g.append(f"[{cur}][f{i}]xfade=transition={design['trans']}:duration={d:.3f}:offset={off:.3f}[x{i}];")
+            cur = f"x{i}"
+            off += parts[i]["end"] - parts[i]["start"] - d
+
+    vd = 0.0 if preview else min(design["vfade"], total / 2) if design["vfade"] > 0 else 0.0
+    vf = []
+    if has_ass:
+        vf.append("ass=filename=subs.ass:fontsdir=.")
+    if vd > 0:
+        vf.append(f"fade=t=in:st=0:d={vd:.2f},fade=t=out:st={max(total - vd, 0):.3f}:d={vd:.2f}")
+    vf.append("format=yuv420p")
+    g.append(f"[{cur}]{','.join(vf)}[out];")
+
+    if not preview:
+        for i, p in enumerate(parts):
+            dur = p["end"] - p["start"]
+            if p["has_audio"]:
+                g.append(f"[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}];")
+            else:
+                g.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS[a{i}];")
+        if n == 1:
+            acur = "a0"
+        elif d == 0:
+            g.append("".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[acat];")
+            acur = "acat"
+        else:
+            acur = "a0"
+            for i in range(1, n):
+                g.append(f"[{acur}][a{i}]acrossfade=d={d:.3f}[ax{i}];")
+                acur = f"ax{i}"
+        ofx = []
+        if design["mute_orig"]:
+            ofx.append("volume=0")
+        if vd > 0:
+            ofx += [f"afade=t=in:st=0:d={vd:.2f}", f"afade=t=out:st={max(total - vd, 0):.3f}:d={vd:.2f}"]
+        g.append(f"[{acur}]{','.join(ofx) or 'anull'}[orig];")
+        if mus_i is not None:
+            fi = min(design["music_fade_in"], total / 2)
+            fo = min(design["music_fade_out"], total / 2)
+            mf = ["aformat=sample_rates=48000:channel_layouts=stereo", f"volume={design['music_vol'] / 100:.3f}"]
+            if fi > 0:
+                mf.append(f"afade=t=in:st=0:d={fi:.2f}")
+            if fo > 0:
+                mf.append(f"afade=t=out:st={max(total - fo, 0):.3f}:d={fo:.2f}")
+            mf.append(f"atrim=0:{total:.3f}")
+            g.append(f"[{mus_i}:a]{','.join(mf)},asetpts=PTS-STARTPTS[mus];")
+            if design["duck"] and not design["mute_orig"]:     # 말할 때 음악을 자동으로 줄인다
+                g.append("[orig]asplit=2[o1][o2];"
+                         "[mus][o2]sidechaincompress=threshold=0.03:ratio=10:attack=30:release=500[duck];"
+                         "[o1][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.97[aout];")
+            else:
+                g.append("[orig][mus]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.97[aout];")
+        else:
+            g.append("[orig]anull[aout];")
+
+    cmd += ["-filter_complex", "".join(g).rstrip(";"), "-map", "[out]"]
     if preview:
         cmd += ["-frames:v", "1", out_name]
     else:
-        cmd += ["-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-t", f"{dur:.3f}", out_name]
+        cmd += ["-map", "[aout]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-t", f"{total:.3f}", out_name]
     return cmd
 
 
-def prepare(video: Path, design: dict, segments: list[dict], start: float, end: float, work: Path):
+def prepare(parts: list[dict], design: dict, bases: list[float], work: Path):
     """work 폴더에 오버레이·자막·글꼴을 준비하고 (has_bg, has_ass) 를 돌려준다."""
     bg, _, footer_top = make_overlays(design, work)
     has_ass = False
-    if design["subs"] and segments:
+    if design["subs"]:
         sf = resolve_font(design["sub_font"] or design["font"])
         family = "Malgun Gothic"
         if sf:
             shutil.copy(sf["path"], work / Path(sf["path"]).name)   # libass 가 찾도록 같은 폴더에 둔다
             family = sf["family"]
-        has_ass = make_ass(segments, start, end, family, design["layout"], work, footer_top) is not None
+        spec = [(p["segments"], p["start"], p["end"], bases[i]) for i, p in enumerate(parts)]
+        has_ass = make_ass(spec, family, design["layout"], work, footer_top) is not None
     return bg is not None, has_ass
 
 
@@ -352,17 +491,20 @@ class RenderError(Exception):
     pass
 
 
-def preview_png(video: Path, design: dict, segments: list[dict], start: float, end: float, out_png: Path) -> None:
-    # 자막이 실제로 나오는 순간을 보여 주려고, 구간 안 첫 문장 근처를 고른다
+def preview_png(part: dict, design: dict, out_png: Path) -> None:
+    """첫 구간의 한 장면으로 디자인을 미리 본다. (자막이 나오는 순간을 골라서)"""
+    start, end = part["start"], part["end"]
     t = start + min(1.5, (end - start) / 2)
-    for sg in segments:
+    for sg in part["segments"]:
         if sg["end"] > start and sg["start"] < end:
             t = min(max(sg["start"] + 0.4, start), end - 0.5)
             break
+    one = dict(part, start=t, end=min(end, t + 2.0))
+    d = dict(design, trans="none")
     with tempfile.TemporaryDirectory(prefix="shorts_prev_") as tmp:
         work = Path(tmp)
-        has_bg, has_ass = prepare(video, design, segments, t, min(end, t + 2.0), work)
-        cmd = build_cmd(video, design, t, 2.0, has_bg, has_ass, "frame.png", preview=True)
+        has_bg, has_ass = prepare([one], d, [0.0], work)
+        cmd = build_cmd([one], d, 0.0, one["end"] - one["start"], has_bg, has_ass, None, "frame.png", preview=True)
         try:
             r = subprocess.run(cmd, cwd=work, capture_output=True, timeout=90)
         except FileNotFoundError:
@@ -386,7 +528,7 @@ class Job:
 
     def public(self) -> dict:
         return {"state": self.state, "progress": round(self.progress, 4), "message": self.message,
-                "elapsed": round(time.time() - self.started, 1)}
+                "elapsed": round(time.time() - self.started, 1), "duration": round(self.dur, 1)}
 
 
 class Renderer:
@@ -405,19 +547,21 @@ class Renderer:
             return job.public()
         p = self.out_path(vid, clip_id)
         if p.is_file():
-            return {"state": "done", "progress": 1.0, "message": "", "elapsed": 0}
-        return {"state": "idle", "progress": 0.0, "message": "", "elapsed": 0}
+            return {"state": "done", "progress": 1.0, "message": "", "elapsed": 0, "duration": 0}
+        return {"state": "idle", "progress": 0.0, "message": "", "elapsed": 0, "duration": 0}
 
-    def start(self, vid: str, clip_id: str, video: Path, clip: dict, segments: list[dict]) -> dict:
+    def start(self, vid: str, clip_id: str, parts: list[dict], clip: dict, music: Optional[Path]) -> dict:
         design = clean_design(clip)
-        start, end = float(clip["start"]), float(clip["end"])
+        for p in parts:
+            p["has_audio"] = probe_has_audio(p["video"])
+        d, total, bases = plan(parts, design)
         with self.lock:
             old = self.jobs.get((vid, clip_id))
             if old and old.state == "running":
                 raise RuntimeError("이미 이 구간을 만드는 중입니다.")
-            job = Job(vid, clip_id, end - start)
+            job = Job(vid, clip_id, total)
             self.jobs[(vid, clip_id)] = job
-        threading.Thread(target=self._run, args=(job, video, design, segments, start, end), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, parts, design, d, total, bases, music), daemon=True).start()
         return job.public()
 
     def cancel(self, vid: str, clip_id: str) -> dict:
@@ -428,17 +572,19 @@ class Renderer:
                 job.proc.kill()
         return self.status(vid, clip_id)
 
-    def _run(self, job: Job, video: Path, design: dict, segments: list[dict], start: float, end: float) -> None:
+    def _run(self, job: Job, parts: list[dict], design: dict, d: float, total: float, bases: list[float],
+             music: Optional[Path]) -> None:
         final = self.out_path(job.vid, job.clip_id)
         final.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="shorts_render_") as tmp:
             work = Path(tmp)
             try:
-                has_bg, has_ass = prepare(video, design, segments, start, end, work)
-                cmd = build_cmd(video, design, start, end - start, has_bg, has_ass, "out.mp4", preview=False)
+                has_bg, has_ass = prepare(parts, design, bases, work)
+                cmd = build_cmd(parts, design, d, total, has_bg, has_ass, music, "out.mp4", preview=False)
                 err = open(work / "ffmpeg.log", "wb")
                 try:
-                    job.proc = subprocess.Popen(cmd, cwd=work, stdout=subprocess.PIPE, stderr=err, text=True, encoding="utf-8", errors="replace")
+                    job.proc = subprocess.Popen(cmd, cwd=work, stdout=subprocess.PIPE, stderr=err, text=True,
+                                                encoding="utf-8", errors="replace")
                 except FileNotFoundError:
                     raise RenderError("ffmpeg 가 없습니다. 'winget install Gyan.FFmpeg' 후 start.bat 을 다시 실행하세요.")
                 for line in job.proc.stdout:               # -progress 출력: out_time_us=123456
@@ -453,7 +599,7 @@ class Renderer:
                     job.state, job.message = "cancelled", "취소했어요."
                     return
                 if job.proc.returncode != 0 or not (work / "out.mp4").exists():
-                    tail = (work / "ffmpeg.log").read_text(encoding="utf-8", errors="replace")[-400:]
+                    tail = (work / "ffmpeg.log").read_text(encoding="utf-8", errors="replace")[-500:]
                     raise RenderError("영상을 만들지 못했어요. " + tail)
                 tmp_final = final.with_suffix(".mp4.tmp")
                 shutil.move(str(work / "out.mp4"), tmp_final)

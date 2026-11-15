@@ -557,6 +557,171 @@ function renderDesign(){
   const lines = [0,1,2].map(n => { const i = el('input',{value:(c0.lines||[])[n]||'',placeholder:`제목 ${n+1}줄${n===0?' (필수)':' (선택)'}`,maxLength:40});
     i.oninput = () => set('lines', lines.map(x => x.value)); return i; });
 
+  // ---- 값 슬라이더 도우미
+  const slider = (label, key, min, max, step, def, unit) => {
+    const val = el('b',{textContent:''});
+    const inp = el('input',{type:'range',min,max,step,value:c0[key] ?? def,style:'padding:0'});
+    const show = () => { val.textContent = (+inp.value) + unit; };
+    inp.oninput = () => { set(key, +inp.value); show(); };
+    show();
+    return el('div',{style:'margin-top:10px'}, el('div',{className:'small mute'}, label + ' ', val), inp);
+  };
+
+  // ---- 이어붙이기 + 전환
+  let allClips = [];
+  const joinList = el('div');
+  const totalInfo = el('div',{className:'small',style:'margin-top:8px'});
+  const addSel = el('select');
+  const refs = () => (c().extra || []);
+  const info = r => allClips.find(x => x.vid === r.vid && x.id === r.id);
+  const moveRef = (i, dlt) => { const a = refs().slice(); const j = i + dlt; if(j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; set('extra', a); paintJoin(); };
+  const paintJoin = () => {
+    joinList.replaceChildren();
+    const rows = [{t:`#1  (지금 구간)  ${fmt(c().start,1)} ~ ${fmt(c().end,1)}`, len:c().end - c().start}];
+    refs().forEach((r, i) => { const a = info(r); rows.push({t:`#${i+2}  ` + (a ? `${a.video} · ${a.title ? a.title + ' · ' : ''}${fmt(a.start,1)} ~ ${fmt(a.end,1)}` : '(삭제됐거나 찾을 수 없는 구간)'), len:a ? a.end - a.start : 0, i, bad:!a}); });
+    rows.forEach(r => {
+      const line = el('div',{className:'row',style:'margin-top:6px;gap:6px'}, el('div',{className:'small',style:'flex:1;min-width:0;word-break:break-all;' + (r.bad ? 'color:#ffb3b3' : ''),textContent:r.t + (r.len ? `  (${r.len.toFixed(1)}초)` : '')}));
+      if(r.i !== undefined){
+        const up = el('button',{textContent:'↑',title:'앞으로',style:'padding:4px 8px'}); up.onclick = () => moveRef(r.i, -1);
+        const dn = el('button',{textContent:'↓',title:'뒤로',style:'padding:4px 8px'}); dn.onclick = () => moveRef(r.i, 1);
+        const rm = el('button',{textContent:'✕',title:'빼기',style:'padding:4px 8px'}); rm.onclick = () => { const a = refs().slice(); a.splice(r.i, 1); set('extra', a); paintJoin(); };
+        line.append(up, dn, rm);
+      }
+      joinList.append(line);
+    });
+    const n = rows.length, tr = c().trans || 'fade';
+    const d = (n < 2 || tr === 'none') ? 0 : (c().trans_dur ?? 0.5);
+    const total = rows.reduce((s, r) => s + r.len, 0) - (n - 1) * d;
+    totalInfo.textContent = `완성 길이 약 ${total.toFixed(1)}초` + (n > 1 && d ? ` (전환 ${d}초씩 겹침)` : '') + (total > 60 ? ' · ⚠ 쇼츠는 60초 이하를 권장해요' : '');
+    totalInfo.style.color = total > 60 ? 'var(--warn)' : 'var(--mute)';
+  };
+  const fillAdd = () => {
+    addSel.replaceChildren(el('option',{value:'',textContent:'뒤에 이어붙일 구간 고르기…'}));
+    allClips.filter(x => !(x.vid === cur.id && x.id === cid)).forEach(x =>
+      addSel.append(el('option',{value:x.vid + '|' + x.id,textContent:`${x.video} · ${x.title ? x.title + ' · ' : ''}${fmt(x.start,1)}~${fmt(x.end,1)} (${(x.end-x.start).toFixed(1)}초)`})));
+  };
+  const addBtn = el('button',{textContent:'＋ 추가'});
+  addBtn.onclick = () => {
+    if(!addSel.value) return;
+    const [vid, id] = addSel.value.split('|');
+    const a = refs().slice();
+    if(a.length >= 8) return say('이어붙일 수 있는 구간은 최대 8개까지예요.', true);
+    a.push({vid, id}); set('extra', a); addSel.value = ''; paintJoin();
+  };
+  const transSel = el('select');
+  (rOpts.transitions || []).forEach(t => transSel.append(el('option',{value:t.id,textContent:t.label})));
+  transSel.value = c0.trans || 'fade';
+  transSel.onchange = () => { set('trans', transSel.value); paintJoin(); };
+  const transDur = slider('전환 길이', 'trans_dur', 0.2, 1.5, 0.1, 0.5, '초');
+  transDur.querySelector('input').addEventListener('input', paintJoin);
+  const joinBox = el('div',{className:'card',style:'margin-top:14px'},
+    el('b',{textContent:'🔗 이어붙이기 · 전환'}),
+    el('div',{className:'small mute',textContent:'구간을 여러 개 이어 하나의 쇼츠로 만들어요. 다른 영상의 구간도 가능해요. (디자인·자막·음악은 전체에 한 번만 적용)'}),
+    joinList, el('div',{className:'row',style:'margin-top:8px'}, addSel, addBtn), totalInfo,
+    lab('전환 효과', transSel), transDur);
+  api('/api/all_clips').then(r => { allClips = r.clips; fillAdd(); paintJoin(); }).catch(() => paintJoin());
+  paintJoin();
+
+  // ---- 배경음악
+  let lib = [];
+  const musSel = el('select');
+  const audio = el('audio',{controls:true,style:'width:100%;margin-top:8px;display:none'});
+  const musNote = el('div',{className:'small',style:'margin-top:6px;white-space:pre-wrap'});
+  const mnote = (t, bad) => { musNote.textContent = t || ''; musNote.style.color = bad ? '#ffb3b3' : 'var(--mute)'; };
+  const tagsIn = el('input',{placeholder:'이 곡의 분위기 태그 (예: 차분, 피아노) — AI 추천이 참고해요',style:'margin-top:8px;display:none'});
+  const delBtn = el('button',{textContent:'🗑 이 곡 목록에서 지우기',style:'margin-top:8px;display:none'});
+  const paintMusic = () => {
+    musSel.replaceChildren(el('option',{value:'',textContent:'(배경음악 없음)'}));
+    lib.forEach(m => musSel.append(el('option',{value:m.name,textContent:`${m.name}  (${fmt(m.duration,0)})`})));
+    const want = c().music || '';
+    musSel.value = lib.some(m => m.name === want) ? want : '';
+    const m = lib.find(x => x.name === musSel.value);
+    audio.style.display = tagsIn.style.display = delBtn.style.display = m ? '' : 'none';
+    if(m){ const u = '/api/music/file/' + encodeURIComponent(m.name); if(!audio.src.endsWith(encodeURIComponent(m.name))) audio.src = u; tagsIn.value = m.tags || ''; }
+    else audio.removeAttribute('src');
+    if(want && !m && lib.length) mnote('선택했던 음악 파일을 찾을 수 없어요. 다시 골라 주세요.', true);
+  };
+  const loadLib = async () => { try{ lib = (await api('/api/music')).music; }catch(e){ mnote(e.message, true); } paintMusic(); };
+  musSel.onchange = () => { set('music', musSel.value); paintMusic(); };
+  tagsIn.onchange = async () => { try{ await api('/api/music/' + encodeURIComponent(musSel.value) + '/tags', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({tags: tagsIn.value})}); await loadLib(); mnote('태그를 저장했어요.'); }catch(e){ mnote(e.message, true); } };
+  delBtn.onclick = async () => {
+    if(!musSel.value || !confirm(`"${musSel.value}" 을(를) 목록에서 지울까요? (파일도 삭제돼요)`)) return;
+    try{ await api('/api/music/' + encodeURIComponent(musSel.value), {method:'DELETE'}); set('music', ''); await loadLib(); mnote('지웠어요.'); }catch(e){ mnote(e.message, true); }
+  };
+  const fileIn = el('input',{type:'file',accept:'audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus',style:'display:none'});
+  const upBtn = el('button',{textContent:'📁 내 파일 올리기',style:'flex:1'});
+  upBtn.onclick = () => fileIn.click();
+  fileIn.onchange = async () => {
+    const f = fileIn.files[0]; if(!f) return;
+    mnote(`"${f.name}" 올리는 중…`); upBtn.disabled = true;
+    try{
+      const r = await api('/api/music/upload?name=' + encodeURIComponent(f.name), {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
+      set('music', r.name); await loadLib(); mnote('올렸어요! 아래에서 미리 들어 보세요.');
+    }catch(e){ mnote(e.message, true); }
+    upBtn.disabled = false; fileIn.value = '';
+  };
+  const urlIn = el('input',{placeholder:'https://…/음악.mp3  (파일 자체의 직접 링크)'});
+  const urlBtn = el('button',{textContent:'가져오기'});
+  urlBtn.onclick = async () => {
+    const u = urlIn.value.trim(); if(!u) return;
+    mnote('인터넷에서 받아오는 중…'); urlBtn.disabled = true;
+    try{
+      const r = await post('/api/music/import', {url:u});
+      set('music', r.name); urlIn.value = ''; await loadLib(); mnote(`가져왔어요 (${r.source}). 라이선스(상업 이용 가능 여부)를 꼭 확인하세요.`);
+    }catch(e){ mnote(e.message, true); }
+    urlBtn.disabled = false;
+  };
+  // AI 음악 추천
+  const recBox = el('div',{style:'margin-top:10px'});
+  const recBtn = el('button',{textContent:'🤖 AI 음악 추천 (분위기·검색 키워드·내 음악 중 고르기)',style:'width:100%'});
+  recBtn.onclick = async () => {
+    if(!await flushSave()) return mnote('저장에 실패했어요.', true);
+    mnote('Claude 가 구간의 말을 읽고 있어요…'); recBtn.disabled = true; recBox.replaceChildren();
+    try{
+      const r = await post('/api/music/recommend', {id:cur.id, clip_id:cid});
+      mnote('');
+      const card = el('div',{className:'card',style:'background:var(--bg)'},
+        el('div',{}, el('b',{textContent:'분위기: '}), r.mood),
+        el('div',{className:'small mute',style:'margin-top:6px',textContent:'무료 음원 사이트에서 이 키워드로 검색해 보세요:'}),
+        el('div',{className:'chips'}, ...r.keywords.map(k => el('span',{className:'chip',textContent:k}))));
+      if(r.picks.length){
+        card.append(el('div',{className:'small mute',style:'margin-top:10px',textContent:'내 음악 중 어울리는 곡:'}));
+        r.picks.forEach(p => {
+          const use = el('button',{textContent:'이 곡 쓰기',className:'primary',style:'padding:4px 10px'});
+          use.onclick = () => { set('music', p.name); set('music_vol', r.volume); paintMusic(); volSl.querySelector('input').value = r.volume; volSl.querySelector('b').textContent = r.volume + '%'; mnote(`"${p.name}" 로 정했고, 음악 크기를 ${r.volume}% 로 맞췄어요.`); };
+          card.append(el('div',{className:'row',style:'margin-top:6px'}, el('div',{className:'small',style:'flex:1',textContent:`${p.name} — ${p.reason}`}), use));
+        });
+      } else card.append(el('div',{className:'small mute',style:'margin-top:10px',textContent: lib.length ? '내 음악 중에는 딱 맞는 곡이 없어요. 위 키워드로 새로 찾아 올려 보세요.' : '아직 올려 둔 음악이 없어요. 위 키워드로 찾은 음악을 올리면 다음부터 목록에서 골라 줘요.'}));
+      card.append(el('div',{className:'small mute',style:'margin-top:8px',textContent:`추천 음악 크기: ${r.volume}%`}));
+      recBox.append(card);
+    }catch(e){ mnote(e.message, true); }
+    recBtn.disabled = false;
+  };
+  const volSl = slider('음악 크기 (말소리보다 작게)', 'music_vol', 0, 100, 5, 25, '%');
+  const duck = el('input',{type:'checkbox',checked:c0.duck !== false,style:'width:auto'}); duck.onchange = () => set('duck', duck.checked);
+  const mute = el('input',{type:'checkbox',checked:!!c0.mute_orig,style:'width:auto'}); mute.onchange = () => set('mute_orig', mute.checked);
+  const musicBox = el('div',{className:'card',style:'margin-top:12px'},
+    el('b',{textContent:'🎵 배경음악'}),
+    el('div',{className:'row',style:'margin-top:8px'}, upBtn), fileIn,
+    el('div',{className:'row',style:'margin-top:8px'}, urlIn, urlBtn),
+    el('div',{className:'small mute',style:'margin-top:4px',textContent:'인터넷 음원은 .mp3 같은 파일 자체의 https 직접 링크만 가져와요. (웹페이지·유튜브 링크는 안 돼요)'}),
+    lab('사용할 음악', musSel), audio, tagsIn, delBtn,
+    volSl,
+    slider('음악 페이드 인 (시작할 때 서서히 커짐)', 'music_fade_in', 0, 5, 0.5, 1, '초'),
+    slider('음악 페이드 아웃 (끝날 때 서서히 작아짐)', 'music_fade_out', 0, 5, 0.5, 2, '초'),
+    slider('음악 시작 위치 (곡의 몇 초부터)', 'music_start', 0, 120, 1, 0, '초'),
+    el('label',{className:'row',style:'margin-top:10px;cursor:pointer'}, duck, el('span',{textContent:'말할 때 음악 자동으로 작게'})),
+    el('label',{className:'row',style:'margin-top:8px;cursor:pointer'}, mute, el('span',{textContent:'원본 소리 끄기 (음악만 사용)'})),
+    recBtn, recBox, musNote,
+    el('div',{className:'small mute',style:'margin-top:8px',textContent:'※ 상업적으로 쓰는 음악은 라이선스(저작권)를 꼭 확인하세요. 곡 길이가 쇼츠보다 짧으면 반복돼요.'}));
+  loadLib();
+
+  // ---- 화면 페이드
+  const fadeBox = el('div',{className:'card',style:'margin-top:12px'},
+    el('b',{textContent:'🌗 화면 페이드 인/아웃'}),
+    el('div',{className:'small mute',textContent:'시작은 검정에서 서서히 나타나고, 끝은 서서히 검정으로 사라져요 (원본 소리도 같이). 0 이면 사용 안 함.'}),
+    slider('페이드 길이', 'vfade', 0, 2, 0.1, 0, '초'));
+
   // 미리보기·렌더
   const img = el('img',{style:'width:100%;max-width:300px;border-radius:12px;border:1px solid var(--line);display:'+(prevUrl[cid]?'block':'none')+';margin-top:10px',alt:'디자인 미리보기'});
   if(prevUrl[cid]) img.src = prevUrl[cid];
@@ -577,7 +742,7 @@ function renderDesign(){
       if(!r.ok){ const j = await r.json().catch(() => ({})); throw new Error(j.detail || '미리보기 실패'); }
       if(prevUrl[cid]) URL.revokeObjectURL(prevUrl[cid]);
       prevUrl[cid] = URL.createObjectURL(await r.blob());
-      img.src = prevUrl[cid]; img.style.display = 'block'; say('이 모양으로 만들어져요. 마음에 들면 "쇼츠 만들기"를 누르세요.');
+      img.src = prevUrl[cid]; img.style.display = 'block'; say('이 모양으로 만들어져요. (첫 구간 기준 한 장면) 마음에 들면 "쇼츠 만들기"를 누르세요.');
     }catch(e){ say(e.message, true); }
     prevBtn.disabled = false;
   };
@@ -620,6 +785,7 @@ function renderDesign(){
     lab('상단 라벨 (선택)', txt('kicker','예: 리더십 한마디',30)),
     lab('제목 (최대 3줄, 마지막 줄이 포인트 컬러)', el('div',{className:'stack'}, ...lines)),
     lab('하단 문구 (선택)', txt('footer','예: 핵심은 이것 한 줄',120)),
+    joinBox, musicBox, fadeBox,
     el('div',{className:'row',style:'margin-top:14px'}, prevBtn, makeBtn, stopBtn),
     bar, note, img, result);
   api(`/api/render/${cur.id}/${cid}`).then(st => { if(st.state === 'running') pollRender(); else if(st.state === 'done'){ showResult(); } }).catch(() => {});
