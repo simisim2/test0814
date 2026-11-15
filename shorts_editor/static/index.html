@@ -226,12 +226,15 @@ kbd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 
       <h2 style="margin-top:24px">저장한 구간 <span id="clipCnt" class="mute"></span></h2>
       <div id="clips"><div class="mute small">아직 없어요. 시작·끝을 정하고 저장하세요.</div></div>
+      <h2 style="margin-top:24px">⑤ 쇼츠 만들기</h2>
+      <div id="design"></div>
+
       <h2 style="margin-top:24px">AI 추천 구간 <span id="recCnt" class="mute"></span></h2>
       <div id="rec"><div class="mute small">아직 없어요. 자막을 만든 뒤 왼쪽 ④ 에서 추천을 받으세요.</div></div>
 
       <h2 style="margin-top:24px">자막 <span id="trCnt" class="mute"></span></h2>
       <div id="tr"><div class="mute small">아직 없어요. 왼쪽에서 자막을 생성하세요.</div></div>
-      <div class="small mute" style="margin-top:18px">※ 구간은 이 PC(서버)에 저장돼요. 폰에서 열어도 같은 구간이 보여요. 렌더는 다음 단계에서 붙습니다.</div>
+      <div class="small mute" style="margin-top:18px">※ 구간과 디자인 설정은 이 PC(서버)에 저장돼요. 폰에서 열어도 같아요.</div>
     </section>
   </main>
 
@@ -437,17 +440,20 @@ async function loadClips(){
     clips = list; clipsReady = true; renderClips();
   }catch(e){ showErr('저장된 구간을 불러오지 못했어요: ' + e.message); }
 }
+let editSeq = 0;   // 디자인 입력이 있을 때마다 증가 (저장 응답이 더 새로운 입력을 덮어쓰지 않게)
 async function persistClips(){
   if(!cur || !clipsReady) return false;
+  const seq = editSeq, id = cur.id;
   try{
-    const r = await api('/api/clips/' + cur.id, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({clips})});
-    clips = r.clips; return true;
+    const r = await api('/api/clips/' + id, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({clips})});
+    if(cur && cur.id === id && seq === editSeq) clips = r.clips;
+    return true;
   }catch(e){ showErr('구간을 저장하지 못했어요: ' + e.message); return false; }
 }
 function renderClips(){
   const box = $('#clips'); box.replaceChildren();
   $('#clipCnt').textContent = clips.length ? `(${clips.length})` : '';
-  if(!clips.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 시작·끝을 정하고 저장하세요.'})); return; }
+  if(!clips.length){ box.append(el('div',{className:'mute small',textContent:'아직 없어요. 시작·끝을 정하고 저장하세요.'})); renderDesign(); return; }
   clips.forEach((c, i) => {
     const play = el('button',{textContent:'▶',title:'재생'}); play.onclick = e => { e.stopPropagation(); playRange(c.start,c.end); goTab('paneStage'); };
     const del = el('button',{textContent:'🗑',title:'삭제',className:'ghost'});
@@ -462,6 +468,7 @@ function renderClips(){
     row.onclick = () => { selClip = c.id; tin = c.start; tout = c.end; renderMarks(); renderClips(); seek(c.start); };  // 눌러서 다시 편집
     box.append(row);
   });
+  renderDesign();
 }
 $('#saveClip').onclick = async () => {
   if(!cur) return showErr('먼저 영상을 열어 주세요.');
@@ -476,6 +483,147 @@ $('#saveClip').onclick = async () => {
   if(!await persistClips()) clips = JSON.parse(before);
   renderClips();
 };
+
+/* ---------- 쇼츠 만들기 (5단계: 디자인 선택 → 미리보기 → 렌더) ---------- */
+let rOpts = null, saveTimer = null, renderTimer = null;
+const prevUrl = {};                         // 구간id -> 미리보기 이미지 blob URL
+const selObj = () => clips.find(c => c.id === selClip);
+function queueSave(){ clearTimeout(saveTimer); saveTimer = setTimeout(persistClips, 500); }
+async function flushSave(){ clearTimeout(saveTimer); return persistClips(); }
+api('/api/render/options').then(o => { rOpts = o; renderDesign(); }).catch(() => {});
+
+function renderDesign(){
+  const box = $('#design'); if(!box) return;
+  box.replaceChildren();
+  clearInterval(renderTimer);
+  const c0 = selObj();
+  if(!c0){ box.append(el('div',{className:'mute small',textContent:'위 "저장한 구간"에서 쇼츠로 만들 구간을 눌러 선택하세요.'})); return; }
+  if(!rOpts){ box.append(el('div',{className:'mute small',textContent:'불러오는 중…'})); return; }
+  const cid = c0.id;
+  if(!(c0.lines && c0.lines.length) && c0.title) c0.lines = [c0.title];       // 제목을 첫 줄에 미리 채움
+  const set = (k, v) => { const o = selObj(); if(!o) return; o[k] = v; editSeq++; queueSave(); };
+  const lab = (t, node, tip) => el('div',{style:'margin-top:12px'}, el('div',{className:'small mute',textContent:t}), node, tip ? el('div',{className:'small mute',style:'margin-top:4px',textContent:tip}) : '');
+  const c = () => selObj() || c0;
+
+  // 화면 배치
+  const layBox = el('div');
+  const cropRow = el('div',{style:'margin-top:8px;display:'+(c0.layout==='fill'?'block':'none')});
+  const crop = el('input',{type:'range',min:0,max:100,value:c0.crop_x ?? 50,style:'padding:0'});
+  crop.oninput = () => set('crop_x', +crop.value);
+  cropRow.append(el('div',{className:'small mute',textContent:'잘라낼 위치 (왼쪽 ↔ 오른쪽) — 강사 얼굴 쪽으로 맞추세요'}), crop);
+  rOpts.layouts.forEach(l => {
+    const [nm, ...rest] = l.label.split(' — ');
+    const r = el('input',{type:'radio',name:'lay',checked:(c0.layout||'card')===l.id,style:'width:auto;margin-top:4px'});
+    r.onchange = () => { set('layout', l.id); cropRow.style.display = l.id==='fill' ? 'block' : 'none'; };
+    layBox.append(el('label',{className:'card',style:'display:flex;gap:10px;align-items:flex-start;margin-top:6px;cursor:pointer'},
+      r, el('div',{}, el('b',{textContent:nm}), el('div',{className:'small mute',textContent:rest.join(' — ')}))));
+  });
+
+  // 자막 on/off
+  const subs = el('input',{type:'checkbox',checked:c0.subs !== false,style:'width:auto'});
+  subs.onchange = () => set('subs', subs.checked);
+  const subRow = el('label',{className:'row',style:'margin-top:12px;cursor:pointer'}, subs, el('span',{textContent:'자막을 영상에 입히기 (말하는 내용을 큰 글씨로)'}));
+
+  // 색 테마 + 포인트 컬러
+  const accent = el('input',{type:'color',style:'width:56px;height:38px;padding:2px'});
+  const themeOf = id => rOpts.themes.find(t => t.id === id) || rOpts.themes[0];
+  const syncAccent = () => { accent.value = c().accent || themeOf(c().theme || 'midnight').accent; };
+  const themeBox = el('div',{style:'display:grid;grid-template-columns:repeat(5,1fr);gap:6px'});
+  const paintThemes = () => [...themeBox.children].forEach(b => b.style.outline = b.dataset.id === (c().theme||'midnight') ? '3px solid var(--accent)' : 'none');
+  rOpts.themes.forEach(t => {
+    const b = el('button',{title:t.label,style:`height:58px;padding:4px;border-radius:10px;background:linear-gradient(160deg,${t.bg[0]},${t.bg[1]});color:${t.text};font-size:11.5px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px`},
+      el('span',{style:`width:14px;height:14px;border-radius:50%;background:${t.accent}`}), t.label);
+    b.dataset.id = t.id;
+    b.onclick = () => { set('theme', t.id); paintThemes(); syncAccent(); };
+    themeBox.append(b);
+  });
+  accent.onchange = () => set('accent', accent.value);
+  const accReset = el('button',{textContent:'테마 기본색'}); accReset.onclick = () => { set('accent',''); syncAccent(); };
+  setTimeout(() => { paintThemes(); syncAccent(); });
+
+  // 글꼴 (추천 표시)
+  const fontSel = (key, firstLabel) => {
+    const sel = el('select');
+    sel.append(el('option',{value:'',textContent:firstLabel}));
+    rOpts.fonts.forEach(f => sel.append(el('option',{value:f.id,textContent:f.label + (f.recommended?'  ★추천':'') + (f.mine?'  (내 글꼴)':'')})));
+    sel.value = c0[key] || ''; sel.onchange = () => set(key, sel.value);
+    return sel;
+  };
+  const rec = rOpts.fonts.find(f => f.recommended);
+  const fontTip = (rec ? `추천: ${rec.label} — 굵고 또렷해서 쇼츠 제목에 잘 읽혀요. ` : '') + `다른 글꼴은 ${rOpts.fonts_dir} 폴더에 .ttf 를 넣고 서버를 다시 켜면 목록에 나타나요.`;
+
+  // 글자
+  const txt = (k, ph, max) => { const i = el('input',{value:c0[k]||'',placeholder:ph,maxLength:max}); i.oninput = () => set(k, i.value); return i; };
+  const lines = [0,1,2].map(n => { const i = el('input',{value:(c0.lines||[])[n]||'',placeholder:`제목 ${n+1}줄${n===0?' (필수)':' (선택)'}`,maxLength:40});
+    i.oninput = () => set('lines', lines.map(x => x.value)); return i; });
+
+  // 미리보기·렌더
+  const img = el('img',{style:'width:100%;max-width:300px;border-radius:12px;border:1px solid var(--line);display:'+(prevUrl[cid]?'block':'none')+';margin-top:10px',alt:'디자인 미리보기'});
+  if(prevUrl[cid]) img.src = prevUrl[cid];
+  const note = el('div',{className:'small',style:'margin-top:8px;white-space:pre-wrap'});
+  const say = (t, bad) => { note.textContent = t || ''; note.style.color = bad ? '#ffb3b3' : 'var(--mute)'; };
+  const prevBtn = el('button',{textContent:'🖼 디자인 미리보기',style:'flex:1'});
+  const makeBtn = el('button',{textContent:'🎬 쇼츠 만들기',className:'primary',style:'flex:1'});
+  const stopBtn = el('button',{textContent:'취소',style:'display:none'});
+  const bar = el('div',{style:'height:8px;background:var(--bg);border-radius:99px;overflow:hidden;margin-top:10px;display:none'}, el('div',{style:'height:100%;width:0;background:var(--accent2);transition:width .3s'}));
+  const result = el('div',{style:'margin-top:10px'});
+  const busy = on => { prevBtn.disabled = makeBtn.disabled = on; stopBtn.style.display = on ? '' : 'none'; bar.style.display = on ? 'block' : 'none'; };
+
+  prevBtn.onclick = async () => {
+    if(!await flushSave()) return say('저장에 실패했어요. 위 오류 메시지를 확인해 주세요.', true);
+    say('미리보기 만드는 중… (몇 초)'); prevBtn.disabled = true;
+    try{
+      const r = await fetch(`/api/render/preview/${cur.id}/${cid}?t=${Date.now()}`);
+      if(!r.ok){ const j = await r.json().catch(() => ({})); throw new Error(j.detail || '미리보기 실패'); }
+      if(prevUrl[cid]) URL.revokeObjectURL(prevUrl[cid]);
+      prevUrl[cid] = URL.createObjectURL(await r.blob());
+      img.src = prevUrl[cid]; img.style.display = 'block'; say('이 모양으로 만들어져요. 마음에 들면 "쇼츠 만들기"를 누르세요.');
+    }catch(e){ say(e.message, true); }
+    prevBtn.disabled = false;
+  };
+  const showResult = () => {
+    result.replaceChildren();
+    const url = `/api/out/${cur.id}/${cid}?t=${Date.now()}`;
+    const vid = el('video',{src:url,controls:true,playsInline:true,style:'width:100%;max-width:300px;border-radius:12px;background:#000'});
+    const dl = el('a',{href:`/api/out/${cur.id}/${cid}?download=1`,textContent:'⬇ mp4 저장',download:`shorts_${cid}.mp4`,style:'display:inline-block;margin-top:8px;color:var(--text)'});
+    result.append(vid, el('br'), dl);
+  };
+  const pollRender = () => {
+    clearInterval(renderTimer);
+    const tick = async () => {
+      if(!cur) return clearInterval(renderTimer);
+      try{
+        const st = await api(`/api/render/${cur.id}/${cid}`);
+        if(st.state === 'running'){ busy(true); bar.firstChild.style.width = (st.progress*100)+'%'; say(`만드는 중… ${Math.round(st.progress*100)}% · ${Math.round(st.elapsed)}초 경과`); return; }
+        clearInterval(renderTimer); busy(false);
+        if(st.state === 'done'){ say('완성! 아래에서 확인하고 저장하세요.'); showResult(); }
+        else if(st.state === 'error') say(st.message, true);
+        else if(st.state === 'cancelled') say('취소했어요.');
+      }catch(e){ clearInterval(renderTimer); busy(false); say(e.message, true); }
+    };
+    tick(); renderTimer = setInterval(tick, 1000);
+  };
+  makeBtn.onclick = async () => {
+    if(!await flushSave()) return say('저장에 실패했어요. 위 오류 메시지를 확인해 주세요.', true);
+    try{ await api(`/api/render/${cur.id}/${cid}`, {method:'POST'}); result.replaceChildren(); pollRender(); }
+    catch(e){ say(e.message, true); }
+  };
+  stopBtn.onclick = () => api(`/api/render/${cur.id}/${cid}/cancel`, {method:'POST'}).catch(() => {});
+
+  box.append(
+    el('div',{className:'small mute',textContent:`선택한 구간: ${fmt(c0.start,1)} ~ ${fmt(c0.end,1)} (${(c0.end-c0.start).toFixed(1)}초)`}),
+    lab('화면 배치', layBox), cropRow, subRow,
+    lab('색 테마', themeBox),
+    lab('포인트 컬러 (제목 마지막 줄·라벨)', el('div',{className:'row'}, accent, accReset)),
+    lab('글꼴 (제목·하단 문구)', fontSel('font','자동 (추천 글꼴)'), fontTip),
+    lab('자막 글꼴', fontSel('sub_font','제목과 같은 글꼴')),
+    lab('상단 라벨 (선택)', txt('kicker','예: 리더십 한마디',30)),
+    lab('제목 (최대 3줄, 마지막 줄이 포인트 컬러)', el('div',{className:'stack'}, ...lines)),
+    lab('하단 문구 (선택)', txt('footer','예: 핵심은 이것 한 줄',120)),
+    el('div',{className:'row',style:'margin-top:14px'}, prevBtn, makeBtn, stopBtn),
+    bar, note, img, result);
+  api(`/api/render/${cur.id}/${cid}`).then(st => { if(st.state === 'running') pollRender(); else if(st.state === 'done'){ showResult(); } }).catch(() => {});
+}
 
 /* ---------- 자막 (2단계) ---------- */
 let segs = [], segEls = [], activeSeg = -1, pollTimer = null;

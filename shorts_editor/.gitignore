@@ -3,3 +3,6 @@ work/
 __pycache__/
 *.pyc
 .env
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc

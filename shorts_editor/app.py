@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from recommend import MODEL, RecommendError, Recommender, has_key, load_env
+from render import LAYOUTS, THEMES, RenderError, Renderer, clean_design, list_fonts, preview_png
 from transcribe import DEFAULT_MODEL, MODELS, Transcriber
 
 BASE = Path(__file__).resolve().parent
@@ -311,6 +312,7 @@ def api_candidates(vid: str):
 CLIPS_DIR = WORK / "clips"
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 MAX_CLIPS = 200
+CLIP_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
 
 
 class Clip(BaseModel):
@@ -319,6 +321,17 @@ class Clip(BaseModel):
     end: float
     title: str = ""
     note: str = ""
+    # 5단계 디자인 설정 (값 검증은 render.clean_design 에서)
+    kicker: str = ""
+    lines: list[str] = []
+    footer: str = ""
+    layout: str = "card"
+    theme: str = "midnight"
+    accent: str = ""
+    subs: bool = True
+    crop_x: int = 50
+    font: str = ""
+    sub_font: str = ""
 
 
 class ClipsReq(BaseModel):
@@ -345,16 +358,102 @@ def api_put_clips(vid: str, req: ClipsReq):
     for c in req.clips:
         if not (c.start == c.start and c.end == c.end) or c.start < 0 or c.end <= c.start:   # NaN·음수·역순 방지
             raise HTTPException(400, f"구간이 올바르지 않아요 (시작 {c.start}, 끝 {c.end}). 끝이 시작보다 뒤여야 해요.")
+        if not CLIP_ID_RE.fullmatch(c.id):
+            raise HTTPException(400, "구간 id 형식이 올바르지 않아요.")
         if c.id in seen:
             raise HTTPException(400, "구간 id 가 중복됐어요.")
         seen.add(c.id)
-        clean.append({"id": c.id[:40], "start": round(c.start, 2), "end": round(c.end, 2),
-                      "title": c.title.strip()[:80], "note": c.note.strip()[:500]})
+        item = {"id": c.id, "start": round(c.start, 2), "end": round(c.end, 2),
+                "title": c.title.strip()[:80], "note": c.note.strip()[:500]}
+        item.update(clean_design(c.model_dump()))
+        clean.append(item)
     clean.sort(key=lambda x: x["start"])
     tmp = f.with_suffix(".json.tmp")
     _save(tmp, {"clips": clean})
     tmp.replace(f)
     return {"clips": clean}
+
+
+# ---------- 5단계: 렌더 / 미리보기 / 글꼴 ----------
+renderer = Renderer(WORK)
+PREVIEW_DIR = WORK / "preview"
+PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _find_clip(vid: str, clip_id: str) -> dict:
+    if not CLIP_ID_RE.fullmatch(clip_id):
+        raise HTTPException(400, "구간 id 형식이 올바르지 않아요.")
+    for c in _load(_clips_file(vid), {"clips": []})["clips"]:
+        if c["id"] == clip_id:
+            return c
+    raise HTTPException(404, "저장된 구간을 찾을 수 없어요. 먼저 '구간 저장'을 눌러 주세요.")
+
+
+def _segments(vid: str) -> list[dict]:
+    tr = transcriber.result(vid)
+    return tr["segments"] if tr else []
+
+
+@app.get("/api/render/options")
+def api_render_options():
+    return {
+        "layouts": [{"id": k, "label": v} for k, v in LAYOUTS.items()],
+        "themes": [{"id": k, "label": v["label"], "bg": list(v["bg"]), "accent": v["accent"], "text": v["text"]}
+                   for k, v in THEMES.items()],
+        "fonts": [{"id": f["id"], "label": f["label"], "recommended": f["recommended"], "mine": f["mine"]}
+                  for f in list_fonts()],
+        "fonts_dir": str(BASE / "fonts"),
+    }
+
+
+@app.get("/api/render/preview/{vid}/{clip_id}")
+def api_render_preview(vid: str, clip_id: str):
+    video = _video_path(vid)
+    clip = _find_clip(vid, clip_id)
+    out = PREVIEW_DIR / f"{vid}_{clip_id}.png"
+    try:
+        preview_png(video, clean_design(clip), _segments(vid), clip["start"], clip["end"], out)
+    except RenderError as e:
+        raise HTTPException(500, str(e))
+    return FileResponse(out, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/render/{vid}/{clip_id}")
+def api_render_start(vid: str, clip_id: str):
+    video = _video_path(vid)
+    clip = _find_clip(vid, clip_id)
+    try:
+        return renderer.start(vid, clip_id, video, clip, _segments(vid))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/render/{vid}/{clip_id}")
+def api_render_status(vid: str, clip_id: str):
+    _clips_file(vid)
+    if not CLIP_ID_RE.fullmatch(clip_id):
+        raise HTTPException(400, "구간 id 형식이 올바르지 않아요.")
+    return renderer.status(vid, clip_id)
+
+
+@app.post("/api/render/{vid}/{clip_id}/cancel")
+def api_render_cancel(vid: str, clip_id: str):
+    _clips_file(vid)
+    if not CLIP_ID_RE.fullmatch(clip_id):
+        raise HTTPException(400, "구간 id 형식이 올바르지 않아요.")
+    return renderer.cancel(vid, clip_id)
+
+
+@app.get("/api/out/{vid}/{clip_id}")
+def api_out(vid: str, clip_id: str, download: int = 0):
+    _clips_file(vid)
+    if not CLIP_ID_RE.fullmatch(clip_id):
+        raise HTTPException(400, "구간 id 형식이 올바르지 않아요.")
+    p = renderer.out_path(vid, clip_id)
+    if not p.is_file():
+        raise HTTPException(404, "아직 만들어진 쇼츠가 없어요.")
+    name = f"shorts_{clip_id}.mp4" if download else None
+    return FileResponse(p, media_type="video/mp4", filename=name, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/media/{vid}")
